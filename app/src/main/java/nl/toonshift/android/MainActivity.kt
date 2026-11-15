@@ -3,6 +3,7 @@ package nl.toonshift.android
 import android.app.TimePickerDialog
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.viewModels
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.*
@@ -10,6 +11,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -17,6 +20,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
+import com.journeyapps.barcodescanner.CaptureActivity
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import kotlinx.coroutines.CancellationException
@@ -28,14 +32,18 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
+class PortraitScanner : CaptureActivity()
+
 class MainActivity : ComponentActivity() {
+    private val pairing: PairingViewModel by viewModels()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val vault = Vault(this)
+        val vault = Vault(applicationContext)
         setContent {
             val dutch = LocalConfiguration.current.locales[0].language == "nl"
             MaterialTheme(colorScheme = lightColorScheme(primary = androidx.compose.ui.graphics.Color(0xFF14694F))) {
-                Surface(modifier = Modifier.fillMaxSize()) { ToonApp(vault, dutch) }
+                Surface(modifier = Modifier.fillMaxSize()) { ToonApp(vault, pairing, dutch) }
             }
         }
     }
@@ -55,68 +63,36 @@ private class TextKit(val dutch: Boolean) {
     }
 }
 
-private data class Pending(val pairing: Pairing, val token: String, val code: String)
-
 @Composable
-private fun ToonApp(vault: Vault, dutch: Boolean) {
+private fun ToonApp(vault: Vault, pairing: PairingViewModel, dutch: Boolean) {
     val t = remember(dutch) { TextKit(dutch) }
     val stored = remember { runCatching { vault.load() } }
     var toons by remember { mutableStateOf(stored.getOrDefault(emptyList())) }
-    var selected by remember { mutableStateOf(toons.firstOrNull()) }
-    var screen by remember { mutableStateOf(if (selected == null) 2 else 0) }
-    var message by remember { mutableStateOf(if (stored.isFailure) t.tr("Stored credentials could not be opened. Pair again.", "Opgeslagen gegevens konden niet worden geopend. Koppel opnieuw.") else "") }
-    var pending by remember { mutableStateOf<Pending?>(null) }
-    var phoneName by remember { mutableStateOf("Android") }
-    var scanning by remember { mutableStateOf(false) }
+    var selectedId by rememberSaveable { mutableStateOf(toons.firstOrNull()?.id) }
+    val selected = toons.firstOrNull { it.id == selectedId }
+    var screen by rememberSaveable { mutableIntStateOf(if (selected == null) 2 else 0) }
+    var message by rememberSaveable { mutableStateOf(if (stored.isFailure) t.tr("Stored credentials could not be opened. Pair again.", "Opgeslagen gegevens konden niet worden geopend. Koppel opnieuw.") else "") }
+    var phoneName by rememberSaveable { mutableStateOf("Android") }
+    val phase by pairing.phase.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val scanner = rememberLauncherForActivityResult(ScanContract()) { result ->
-        val payload = result.contents ?: return@rememberLauncherForActivityResult
-        scope.launch {
-            scanning = true
+        val payload = result.contents
+        if (payload == null) {
+            pairing.scanCancelled()
+        } else {
             message = ""
-            try {
-                val pair = Pairing.parse(payload)
-                val secret = newSecret()
-                val token = "${pair.id}.$secret"
-                val name = phoneName.trim().ifEmpty { "Android" }
-                require(name.toByteArray().size <= 32)
-                val verifier = sha256(secret.toByteArray())
-                val claim = JSONObject().put("secret", pair.secret).put("name", name).put("verifier", verifier)
-                val reply = ToonApi(pair.host, pair.pin).call("/v1/pair/claim", "POST", claim)
-                pending = Pending(pair, token, JSONObject(reply).getString("code"))
-            } catch (e: CancellationException) { throw e }
-            catch (e: Exception) {
-                message = if (e is IllegalArgumentException || e is org.json.JSONException)
-                    t.tr("Scan a valid code from your Toon's Remote access screen.", "Scan een geldige code van het Toon-scherm Externe toegang.")
-                else t.failure(e)
-            } finally { scanning = false }
+            pairing.connect(vault, payload, phoneName)
         }
     }
-    LaunchedEffect(pending) {
-        val job = pending ?: return@LaunchedEffect
-        val api = ToonApi(job.pairing.host, job.pairing.pin, job.token)
-        val until = android.os.SystemClock.elapsedRealtime() + 120_000
-        while (android.os.SystemClock.elapsedRealtime() < until) {
-            try {
-                val reply = JSONObject(api.call("/v1/device"))
-                val toon = Toon(job.pairing.id, reply.optString("name", "ToonShift"), job.pairing.host, job.pairing.pin,
-                    job.token, reply.optString("timezone", "Europe/Amsterdam"))
-                val updated = toons.filterNot { it.host == toon.host } + toon
-                vault.save(updated)
-                toons = updated
-                selected = toon
-                pending = null
-                screen = 0
-                return@LaunchedEffect
-            } catch (e: CancellationException) { throw e }
-            catch (e: HttpFailure) {
-                if (e.status != 401) { message = t.failure(e); break }
-            } catch (e: Exception) { message = t.failure(e); break }
-            delay(1800)
+    LaunchedEffect(phase) {
+        if (phase is PairingPhase.Paired) {
+            val ready = phase as PairingPhase.Paired
+            toons = ready.devices
+            selectedId = ready.selected
+            screen = 0
+            pairing.cancel()
         }
-        if (message.isBlank()) message = t.tr("Pairing expired or was denied.", "Koppeling verlopen of geweigerd.")
-        pending = null
     }
     val device = selected
     val api = remember(device) { device?.let { ToonApi(it.host, it.pin, it.token) } }
@@ -195,7 +171,7 @@ private fun ToonApp(vault: Vault, dutch: Boolean) {
                     toons.forEach { item ->
                         ElevatedCard(Modifier.fillMaxWidth()) {
                             Row(Modifier.padding(14.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                TextButton(onClick = { selected = item; screen = 0 }) { Text("${item.name} · ${item.host}") }
+                                TextButton(onClick = { selectedId = item.id; screen = 0 }) { Text("${item.name} · ${item.host}") }
                                 TextButton(onClick = {
                                     scope.launch {
                                         try {
@@ -205,7 +181,7 @@ private fun ToonApp(vault: Vault, dutch: Boolean) {
                                             val remaining = toons.filterNot { it.id == item.id }
                                             vault.save(remaining)
                                             toons = remaining
-                                            if (selected?.id == item.id) selected = remaining.firstOrNull()
+                                            if (selectedId == item.id) selectedId = remaining.firstOrNull()?.id
                                         } catch (e: CancellationException) { throw e }
                                         catch (e: Exception) { message = t.failure(e) }
                                     }
@@ -213,18 +189,49 @@ private fun ToonApp(vault: Vault, dutch: Boolean) {
                             }
                         }
                     }
-                    Text(t.tr("At home, open Settings → Remote access → Pair phone on the Toon.",
-                        "Open thuis op de Toon Instellingen → Externe toegang → Telefoon koppelen."))
-                    OutlinedTextField(value=phoneName,onValueChange={ if (it.toByteArray().size <= 32) phoneName=it },
-                        label={Text(t.tr("Phone name","Telefoonnaam"))},singleLine=true)
-                    Button(onClick={
-                        scanner.launch(ScanOptions().setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-                            .setPrompt(t.tr("Scan Toon pairing code", "Scan de koppelcode")).setBeepEnabled(false))
-                    },enabled=!scanning && pending==null) { Text(t.tr("Scan pairing code","Scan koppelcode")) }
-                    pending?.let {
-                        Text(t.tr("Confirm this code on the Toon","Bevestig deze code op de Toon"))
-                        Text(it.code,style=MaterialTheme.typography.displaySmall)
-                        TextButton(onClick={pending=null}) { Text(t.tr("Cancel","Annuleren")) }
+                    when (val progress = phase) {
+                        PairingPhase.Connecting -> {
+                            Text(t.tr("Connecting securely to the Toon…","Veilige verbinding met de Toon maken…"))
+                            LinearProgressIndicator(Modifier.fillMaxWidth())
+                            TextButton(onClick={pairing.cancel()}) { Text(t.tr("Cancel","Annuleren")) }
+                        }
+                        is PairingPhase.Approval -> {
+                            Text(t.tr("Approve this phone on the Toon","Keur deze telefoon goed op de Toon"),
+                                style=MaterialTheme.typography.titleLarge)
+                            Text(progress.code,style=MaterialTheme.typography.displaySmall)
+                            Text(t.tr("Check that the same code appears on the Toon, then tap Allow control there.",
+                                "Controleer of dezelfde code op de Toon staat en tik daar op Bediening toestaan."))
+                            TextButton(onClick={pairing.cancel()}) { Text(t.tr("Cancel","Annuleren")) }
+                        }
+                        is PairingPhase.Paired -> LinearProgressIndicator(Modifier.fillMaxWidth())
+                        PairingPhase.Idle, is PairingPhase.Failed -> {
+                            if (progress is PairingPhase.Failed) {
+                                val error = progress.error
+                                Text(when {
+                                    error is IllegalArgumentException || error is org.json.JSONException ->
+                                        t.tr("Scan a valid code from your Toon's Remote access screen.", "Scan een geldige code van het Toon-scherm Externe toegang.")
+                                    error is ScanCancelled ->
+                                        t.tr("No QR code was received. Open the scanner and try again.",
+                                            "Geen QR-code ontvangen. Open de scanner en probeer opnieuw.")
+                                    error is PairingExpired || error is HttpFailure && error.status == 410 ->
+                                        t.tr("This pairing session ended. Tap Pair phone on the Toon for a fresh code.",
+                                            "Deze koppelsessie is afgelopen. Tik op Telefoon koppelen op de Toon voor een nieuwe code.")
+                                    else -> t.failure(error)
+                                }, color=MaterialTheme.colorScheme.error)
+                            }
+                            Text(t.tr("Use the same Wi-Fi as your Toon during setup.",
+                                "Gebruik tijdens het koppelen hetzelfde wifi-netwerk als je Toon."))
+                            Text(t.tr("On the Toon: Settings → Remote access → Pair phone.",
+                                "Op de Toon: Instellingen → Externe toegang → Telefoon koppelen."))
+                            OutlinedTextField(value=phoneName,onValueChange={ if (it.toByteArray().size <= 32) phoneName=it },
+                                label={Text(t.tr("Phone name","Telefoonnaam"))},singleLine=true)
+                            Button(onClick={
+                                scanner.launch(ScanOptions().setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                                    .setCaptureActivity(PortraitScanner::class.java)
+                                    .setOrientationLocked(true)
+                                    .setPrompt(t.tr("Scan Toon pairing code", "Scan de koppelcode")).setBeepEnabled(false))
+                            }) { Text(t.tr("Scan pairing code","Scan koppelcode")) }
+                        }
                     }
                 }
             }
