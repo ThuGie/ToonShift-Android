@@ -1,0 +1,51 @@
+name: Android build and release
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Check Android SDK
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+      - name: Test, lint and build APK
+        run: bash gradlew --no-daemon testDebugUnitTest lintDebug assembleDebug
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: toonshift-android-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+  release:
+    if: github.event_name == 'push' && github.ref_type == 'tag' && github.ref_protected
+    needs: build
+    runs-on: ubuntu-24.04
+    environment: android-release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Build signed APK
+        env:
+          TOONSHIFT_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          TOONSHIFT_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          grep -Fq "versionName = \"${GITHUB_REF_NAME#v}\"" app/build.gradle.kts
+          umask 077
+          export TOONSHIFT_KEYSTORE="$(mktemp)"
+          trap 'rm -f "$TOONSHIFT_KEYSTORE"' EXIT
+          printf '%s' "$TOONSHIFT_KEYSTORE_B64" | base64 -d > "$TOONSHIFT_KEYSTORE"
+          bash gradlew --no-daemon assembleRelease
+          cp app/build/outputs/apk/release/app-release.apk ToonShift-Android.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs ToonShift-Android.apk
+          sha256sum ToonShift-Android.apk > SHA256SUMS
+      - name: Publish Android APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" ToonShift-Android.apk SHA256SUMS --verify-tag --generate-notes
