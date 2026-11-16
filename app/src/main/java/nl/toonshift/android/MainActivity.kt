@@ -3,11 +3,13 @@ package nl.toonshift.android
 import android.app.TimePickerDialog
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
@@ -15,7 +17,9 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -41,16 +45,14 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
         val vault = Vault(applicationContext)
         setContent {
             val dutch = LocalConfiguration.current.locales[0].language == "nl"
-            val colors = if (isSystemInDarkTheme()) {
-                darkColorScheme(primary = Color(0xFF90DABC), secondaryContainer = Color(0xFF274A40))
-            } else {
-                lightColorScheme(primary = Color(0xFF14694F), secondaryContainer = Color(0xFFD1EEE0))
-            }
-            MaterialTheme(colorScheme = colors) {
-                Surface(modifier = Modifier.fillMaxSize()) { ToonApp(vault, pairing, dutch) }
+            ToonTheme {
+                Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                    ToonApp(vault, pairing, dutch)
+                }
             }
         }
     }
@@ -107,8 +109,9 @@ private fun ToonApp(vault: Vault, pairing: PairingViewModel, dutch: Boolean) {
     var last by remember(device) { mutableStateOf<Instant?>(null) }
     var connected by remember(device) { mutableStateOf(false) }
     var working by remember(device) { mutableStateOf(false) }
-    LaunchedEffect(api, lifecycle) {
-        if (api == null) return@LaunchedEffect
+    val needsStatus = screen == 0 || screen == 1
+    LaunchedEffect(api, lifecycle, needsStatus) {
+        if (api == null || !needsStatus) return@LaunchedEffect
         lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             var backoff = 1000L
             while (true) {
@@ -120,6 +123,7 @@ private fun ToonApp(vault: Vault, pairing: PairingViewModel, dutch: Boolean) {
                         } else {
                             if (event.length() > 0) status = event
                             if (status != null) {
+                                if (!connected) message = ""
                                 connected = true
                                 last = Instant.now()
                                 backoff = 1000L
@@ -157,36 +161,52 @@ private fun ToonApp(vault: Vault, pairing: PairingViewModel, dutch: Boolean) {
 
     Scaffold(
         modifier = Modifier.fillMaxSize().systemBarsPadding(),
+        containerColor = MaterialTheme.colorScheme.background,
+        topBar = {
+            Surface(color = MaterialTheme.colorScheme.surface) {
+                AppMasthead(device, t) { screen = 2; message = "" }
+            }
+        },
         bottomBar = {
-            NavigationBar {
+            NavigationBar(containerColor = MaterialTheme.colorScheme.surface, windowInsets = WindowInsets(0, 0, 0, 0)) {
                 listOf(
-                    Triple(0, t.tr("Thermostat", "Thermostaat"), "°"),
-                    Triple(3, t.tr("Energy", "Energie"), "ϟ"),
-                    Triple(1, t.tr("Schedule", "Programma"), "▤"),
-                    Triple(2, t.tr("Devices", "Apparaten"), "▣")
-                ).forEach { (index, label, glyph) ->
+                    0 to t.tr("Home", "Thuis"),
+                    3 to t.tr("Energy", "Energie"),
+                    1 to t.tr("Schedule", "Programma"),
+                    2 to t.tr("Devices", "Apparaten")
+                ).forEach { (index, label) ->
                     NavigationBarItem(selected = screen == index, onClick = { screen = index; message = "" },
-                        icon = { Text(glyph, style = MaterialTheme.typography.titleLarge) },
+                        icon = { NavSymbol(index) },
                         label = { Text(label, maxLines = 1) }, enabled = index == 2 || device != null)
                 }
             }
         }
     ) { padding ->
         val scroll = key(screen) { rememberScrollState() }
-        Column(Modifier.padding(padding).fillMaxSize().verticalScroll(scroll).padding(20.dp),
+        Box(Modifier.padding(padding).fillMaxSize().verticalScroll(scroll), contentAlignment = Alignment.TopCenter) {
+        Column(Modifier.widthIn(max = 660.dp).fillMaxWidth().padding(horizontal = 20.dp, vertical = 18.dp),
             verticalArrangement = Arrangement.spacedBy(15.dp)) {
-            if (screen != 3) Text("ToonShift", style = MaterialTheme.typography.headlineLarge)
-            if (message.isNotBlank() && screen != 3) Text(message, color = MaterialTheme.colorScheme.error)
+            if (message.isNotBlank() && screen != 3) Surface(
+                modifier = Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium,
+                color = MaterialTheme.colorScheme.errorContainer,
+                contentColor = MaterialTheme.colorScheme.onErrorContainer
+            ) { Text(message, Modifier.padding(14.dp)) }
             when (screen) {
                 0 -> if (device != null) Thermostat(device, t, status, last, connected, working, write)
                 1 -> if (api != null && device != null) Programme(api, device, connected, t) { message = it }
                 3 -> if (api != null && device != null) EnergyScreen(api, device, t)
                 else -> {
-                    Text(t.tr("Paired devices","Gekoppelde apparaten"), style=MaterialTheme.typography.titleLarge)
+                    PageHeading(t.tr("Devices","Apparaten"))
                     toons.forEach { item ->
-                        ElevatedCard(Modifier.fillMaxWidth()) {
-                            Row(Modifier.padding(14.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                TextButton(onClick = { selectedId = item.id; screen = 0 }) { Text("${item.name} · ${item.host}") }
+                        Card(Modifier.fillMaxWidth()) {
+                            Row(Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                TextButton(modifier = Modifier.weight(1f), onClick = { selectedId = item.id; screen = 0 }) {
+                                    Column(Modifier.fillMaxWidth()) {
+                                        Text(item.name, style = MaterialTheme.typography.titleMedium)
+                                        Text(item.host, style = MaterialTheme.typography.bodySmall)
+                                    }
+                                }
                                 TextButton(onClick = {
                                     scope.launch {
                                         try {
@@ -234,13 +254,14 @@ private fun ToonApp(vault: Vault, pairing: PairingViewModel, dutch: Boolean) {
                                     else -> t.failure(error)
                                 }, color=MaterialTheme.colorScheme.error)
                             }
+                            Text(t.tr("Pair a phone","Telefoon koppelen"), style = MaterialTheme.typography.titleLarge)
                             Text(t.tr("Use the same Wi-Fi as your Toon during setup.",
                                 "Gebruik tijdens het koppelen hetzelfde wifi-netwerk als je Toon."))
                             Text(t.tr("On the Toon: Settings → Remote access → Pair phone.",
                                 "Op de Toon: Instellingen → Externe toegang → Telefoon koppelen."))
                             OutlinedTextField(value=phoneName,onValueChange={ if (it.toByteArray().size <= 32) phoneName=it },
-                                label={Text(t.tr("Phone name","Telefoonnaam"))},singleLine=true)
-                            Button(onClick={
+                                label={Text(t.tr("Phone name","Telefoonnaam"))},singleLine=true, modifier = Modifier.fillMaxWidth())
+                            Button(modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp), onClick={
                                 scanner.launch(ScanOptions().setDesiredBarcodeFormats(ScanOptions.QR_CODE)
                                     .setCaptureActivity(PortraitScanner::class.java)
                                     .setOrientationLocked(true)
@@ -250,6 +271,7 @@ private fun ToonApp(vault: Vault, pairing: PairingViewModel, dutch: Boolean) {
                     }
                 }
             }
+        }
         }
     }
 }
@@ -264,29 +286,46 @@ private fun Thermostat(toon: Toon, t: TextKit, status: JSONObject?, last: Instan
     } ?: "—"
     fun time(value: Instant) = DateTimeFormatter.ofPattern("HH:mm").withZone(ZoneId.of(toon.zone)).format(value)
     var hold by remember { mutableStateOf(false) }
-    Text(toon.name,style=MaterialTheme.typography.titleLarge)
-    Text(if (connected) t.tr("Connected","Verbonden") else t.tr("Disconnected","Niet verbonden"))
-    last?.let { Text("${t.tr("Last confirmed","Laatst bevestigd")} ${time(it)}") }
-    ElevatedCard(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(20.dp),verticalArrangement=Arrangement.spacedBy(9.dp)) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween) {
+        PageHeading(t.tr("Climate", "Klimaat"))
+        StatusPill(if (connected) t.tr("Connected","Verbonden") else t.tr("Offline","Offline"), connected)
+    }
+    Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(
+        containerColor = MaterialTheme.colorScheme.primaryContainer,
+        contentColor = MaterialTheme.colorScheme.onPrimaryContainer
+    )) {
+        Column(Modifier.padding(22.dp),verticalArrangement=Arrangement.spacedBy(9.dp)) {
             Text(t.tr("Room temperature","Kamertemperatuur"))
             Text(temperature(room),style=MaterialTheme.typography.displayMedium)
-            Text("${t.tr("Target","Doel")} ${temperature(target)}",style=MaterialTheme.typography.titleLarge)
-            Row(horizontalArrangement=Arrangement.spacedBy(12.dp)) {
+            if (!connected && last != null) Text("${t.tr("Last confirmed","Laatst bevestigd")} ${time(last)}",
+                style = MaterialTheme.typography.bodySmall)
+            HorizontalDivider(Modifier.padding(vertical = 6.dp))
+            Text(t.tr("Target temperature","Doeltemperatuur"),style=MaterialTheme.typography.labelLarge)
+            Row(horizontalArrangement=Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
                 for (step in listOf(-50,50)) {
+                    if (step > 0) Text(temperature(target), Modifier.weight(1f),
+                        style = MaterialTheme.typography.headlineSmall, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
                     val next = target?.plus(step)?.coerceIn(600,3000)
+                    val description = if (step < 0) t.tr("Decrease target","Doel verlagen") else t.tr("Increase target","Doel verhogen")
                     Button(onClick={ if (next != null) write("/v1/setpoint",JSONObject().put("centi_celsius",next)) },
                         enabled=connected && !working && next!=null && next!=target,
-                        modifier=Modifier.weight(1f)) { Text(if(step<0) "−" else "+",style=MaterialTheme.typography.headlineSmall) }
+                        contentPadding = PaddingValues(0.dp), modifier=Modifier.size(52.dp).semantics { contentDescription = description }) {
+                        Text(if(step<0) "−" else "+",style=MaterialTheme.typography.headlineSmall)
+                    }
                 }
             }
             if (working) LinearProgressIndicator(Modifier.fillMaxWidth())
         }
     }
-    val heating = status?.optString("currentModulationLevel")?.toIntOrNull()
-    Text(when { heating == null -> t.tr("Heating status unavailable","Verwarmingsstatus onbekend")
-        heating > 0 -> t.tr("Heat requested","Warmtevraag")
-        else -> t.tr("Heating idle","Verwarming in rust") })
+    val heating = status?.optString("burnerInfo")?.toIntOrNull()
+    StatusPill(when (heating.takeIf { connected }) {
+        0 -> t.tr("Heating idle","Verwarming in rust")
+        1 -> t.tr("Heating","Verwarming actief")
+        2 -> t.tr("Heating hot water","Warm water opwarmen")
+        3 -> t.tr("Preheating","Voorverwarmen")
+        else -> t.tr("Heating status unavailable","Verwarmingsstatus onbekend")
+    }, connected && (heating ?: 0) in 1..3)
     val active = status?.optString("activeState")?.toIntOrNull()?.let(t.presets::getOrNull)
     if (active != null) Text("${t.tr("Active preset","Actieve stand")} · $active")
     val programmed = status?.optString("programState")
@@ -336,7 +375,7 @@ private fun Thermostat(toon: Toon, t: TextKit, status: JSONObject?, last: Instan
 
 @Composable
 private fun Programme(api: ToonApi, toon: Toon, connected: Boolean, t: TextKit, message: (String) -> Unit) {
-    var day by remember(toon.id) { mutableIntStateOf(0) }
+    var day by rememberSaveable(toon.id) { mutableIntStateOf(0) }
     var slots by remember(toon.id) { mutableStateOf(emptyList<Slot>()) }
     var revision by remember(toon.id) { mutableStateOf("") }
     var busy by remember(toon.id) { mutableStateOf(false) }
@@ -377,21 +416,20 @@ private fun Programme(api: ToonApi, toon: Toon, connected: Boolean, t: TextKit, 
         }
     }
     val ready=connected && revision.isNotBlank() && !busy
-    Text(t.tr("Weekly schedule","Weekprogramma"),style=MaterialTheme.typography.headlineSmall)
-    Text(toon.zone)
-    Row(Modifier.fillMaxWidth(), horizontalArrangement=Arrangement.SpaceBetween) {
-        t.days.forEachIndexed { index, name ->
+    PageHeading(t.tr("Weekly schedule","Weekprogramma"), toon.zone)
+    LazyRow(Modifier.fillMaxWidth(), horizontalArrangement=Arrangement.spacedBy(6.dp)) {
+        itemsIndexed(t.days) { index, name ->
             FilterChip(selected=day==index,onClick={day=index},label={Text(name)})
         }
     }
     if (!connected) Text(t.tr("Disconnected","Niet verbonden"))
     if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
-    val daily = slots.filter { it.start / 1440 == day }
+    val daily = remember(slots, day) { slots.filter { it.start / 1440 == day } }
     if (daily.isEmpty() && revision.isNotBlank()) Text(t.tr("No periods on this day","Geen perioden op deze dag"))
     daily.forEach { slot ->
         ElevatedCard(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(14.dp)) {
-                Text("${minutesText(slot.start)} – ${minutesText(slot.end)}" + if(slot.end/1440 != day) " · ${t.days[slot.end/1440]}" else "",
+                Text("${minutesText(slot.start)} – ${minutesText(slot.end)}" + if(slot.end/1440 != day) " · ${t.days[(slot.end/1440)%7]}" else "",
                     style=MaterialTheme.typography.titleLarge)
                 Text(t.presets.getOrNull(slot.preset) ?: "—")
                 Row {

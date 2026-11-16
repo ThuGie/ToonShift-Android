@@ -3,6 +3,8 @@ package nl.toonshift.android
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -35,11 +37,11 @@ internal enum class EnergyMeter(val id: String, val en: String, val nl: String) 
 }
 
 internal enum class EnergyPeriod(val id: String, val en: String, val nl: String) {
-    Hour("hour", "1 hour", "1 uur"),
-    Day("day", "24 hours", "24 uur"),
-    Week("week", "7 days", "7 dagen"),
-    Month("month", "31 days", "31 dagen"),
-    Year("year", "365 days", "365 dagen")
+    Hour("hour", "1h", "1u"),
+    Day("day", "24h", "24u"),
+    Week("week", "7d", "7d"),
+    Month("month", "31d", "31d"),
+    Year("year", "365d", "365d")
 }
 
 internal data class EnergyChart(
@@ -71,27 +73,25 @@ internal data class EnergyChart(
     }
 }
 
-private data class LiveEnergy(val value: Double, val unit: String, val age: Long) {
+private data class LiveEnergy(val value: Double, val unit: String, val measuredAt: Long) {
     companion object {
-        fun parse(body: JSONObject, meter: EnergyMeter, expectedUnit: String): LiveEnergy? {
+        fun parse(body: JSONObject, meter: EnergyMeter, expectedUnit: String, receivedAt: Long): LiveEnergy? {
             val item = body.optJSONObject(meter.id) ?: return null
             val value = item.optDouble("value")
             val age = item.optLong("age_seconds", -1)
-            return if (value.isFinite() && value >= 0 && age in 0..120 && item.optString("unit") == expectedUnit)
-                LiveEnergy(value, expectedUnit, age) else null
+            return if (value.isFinite() && value >= 0 && age >= 0 && age <= receivedAt && item.optString("unit") == expectedUnit)
+                LiveEnergy(value, expectedUnit, receivedAt - age) else null
         }
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun EnergyScreen(api: ToonApi, toon: Toon, t: TextKit) {
     var meter by rememberSaveable(toon.id) { mutableStateOf(EnergyMeter.Electricity) }
     var period by rememberSaveable(toon.id) { mutableStateOf(EnergyPeriod.Day) }
     var refresh by remember { mutableIntStateOf(0) }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
-    var live by remember(api) { mutableStateOf<JSONObject?>(null) }
-    var liveAt by remember(api) { mutableLongStateOf(0) }
+    var live by remember(api) { mutableStateOf<Pair<LiveEnergy?, LiveEnergy?>?>(null) }
     var liveError by remember(api) { mutableStateOf<Exception?>(null) }
     var liveLoading by remember(api) { mutableStateOf(true) }
     var chart by remember(api, meter, period) { mutableStateOf<EnergyChart?>(null) }
@@ -99,6 +99,7 @@ internal fun EnergyScreen(api: ToonApi, toon: Toon, t: TextKit) {
     var historyError by remember(api, meter, period) { mutableStateOf<Exception?>(null) }
     var selected by remember(api, meter, period, chart?.to) { mutableStateOf<Int?>(null) }
     var showReadings by rememberSaveable { mutableStateOf(false) }
+    var readingLimit by remember(meter, period) { mutableIntStateOf(12) }
     val locale = if (t.dutch) Locale.forLanguageTag("nl-NL") else Locale.UK
     val format = remember(locale) { NumberFormat.getNumberInstance(locale).apply { maximumFractionDigits = 3 } }
     val zone = remember(toon.zone) { ZoneId.of(toon.zone) }
@@ -107,8 +108,10 @@ internal fun EnergyScreen(api: ToonApi, toon: Toon, t: TextKit) {
         lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             while (true) {
                 try {
-                    live = JSONObject(api.call("/v1/energy/live"))
-                    liveAt = Instant.now().epochSecond
+                    val payload = JSONObject(api.call("/v1/energy/live"))
+                    val receivedAt = Instant.now().epochSecond
+                    live = LiveEnergy.parse(payload, EnergyMeter.Electricity, "W", receivedAt) to
+                        LiveEnergy.parse(payload, EnergyMeter.Gas, "L/h", receivedAt)
                     liveError = null
                 } catch (e: CancellationException) { throw e }
                 catch (e: Exception) { live = null; liveError = e }
@@ -134,32 +137,33 @@ internal fun EnergyScreen(api: ToonApi, toon: Toon, t: TextKit) {
 
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween) {
-        Text(t.tr("Energy", "Energie"), style = MaterialTheme.typography.headlineMedium)
+        PageHeading(t.tr("Energy", "Energie"))
         TextButton(onClick = { refresh++ }) { Text(t.tr("Refresh", "Vernieuwen")) }
     }
     Text(t.tr("Live usage", "Actueel verbruik"), style = MaterialTheme.typography.titleLarge)
     val current = live
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        for ((type, unit) in listOf(EnergyMeter.Electricity to "W", EnergyMeter.Gas to "L/h")) {
-            val reading = current?.let { LiveEnergy.parse(it, type, unit) }
-            val sampledAt = reading?.let { Instant.ofEpochSecond(liveAt - it.age) }
+        for ((type, reading) in listOf(EnergyMeter.Electricity to current?.first, EnergyMeter.Gas to current?.second)) {
             FilledEnergyCard(Modifier.weight(1f), t.tr(type.en, type.nl),
                 reading?.let { "${format.format(it.value)} ${it.unit}" } ?: "—",
-                sampledAt?.let { date(it.epochSecond, zone, locale, "HH:mm:ss") }
+                reading?.let { date(it.measuredAt, zone, locale, "HH:mm:ss") }
                     ?: if (liveLoading) t.tr("Loading…", "Laden…") else t.tr("Unavailable", "Niet beschikbaar"))
         }
     }
     liveError?.let { Text(energyError(it, t), color = MaterialTheme.colorScheme.error) }
     HorizontalDivider()
     Text(t.tr("Usage history", "Verbruiksgeschiedenis"), style = MaterialTheme.typography.titleLarge)
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        EnergyMeter.entries.forEach { option ->
+    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        items(EnergyMeter.entries, key = { it.id }) { option ->
             FilterChip(selected = meter == option, onClick = { meter = option }, label = { Text(t.tr(option.en, option.nl)) })
         }
     }
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        EnergyPeriod.entries.forEach { option ->
-            FilterChip(selected = period == option, onClick = { period = option }, label = { Text(t.tr(option.en, option.nl)) })
+    SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+        EnergyPeriod.entries.forEachIndexed { index, option ->
+            SegmentedButton(selected = period == option, onClick = { period = option },
+                shape = SegmentedButtonDefaults.itemShape(index, EnergyPeriod.entries.size),
+                icon = {},
+                label = { Text(t.tr(option.en, option.nl), maxLines = 1) })
         }
     }
     val history = chart
@@ -197,9 +201,14 @@ internal fun EnergyScreen(api: ToonApi, toon: Toon, t: TextKit) {
             TextButton(onClick = { showReadings = !showReadings }) {
                 Text(if (showReadings) t.tr("Hide readings", "Metingen verbergen") else t.tr("Show readings", "Metingen tonen"))
             }
-            if (showReadings) history.bars.indices.forEach { i ->
-                ReadingRow(history, i, zone, locale, t, format)
-                HorizontalDivider()
+            if (showReadings) {
+                for (i in history.bars.indices.reversed().take(readingLimit)) {
+                    ReadingRow(history, i, zone, locale, t, format)
+                    HorizontalDivider()
+                }
+                if (readingLimit < history.bars.size) TextButton(onClick = { readingLimit += 12 }) {
+                    Text(t.tr("Show older readings", "Toon oudere metingen"))
+                }
             }
         }
     }
@@ -207,7 +216,10 @@ internal fun EnergyScreen(api: ToonApi, toon: Toon, t: TextKit) {
 
 @Composable
 private fun FilledEnergyCard(modifier: Modifier, title: String, value: String, detail: String) {
-    Card(modifier) {
+    Card(modifier, colors = CardDefaults.cardColors(
+        containerColor = MaterialTheme.colorScheme.primaryContainer,
+        contentColor = MaterialTheme.colorScheme.onPrimaryContainer
+    )) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(title, style = MaterialTheme.typography.labelLarge)
             Text(value, style = MaterialTheme.typography.headlineSmall)
@@ -222,7 +234,7 @@ private fun EnergyBars(chart: EnergyChart, selected: Int?, t: TextKit, format: N
     val muted = MaterialTheme.colorScheme.outlineVariant
     val selectedColor = MaterialTheme.colorScheme.onSurface
     val partial = androidx.compose.ui.graphics.Color(0xFFB67928)
-    val maximum = chart.bars.filterNotNull().maxOrNull()?.takeIf { it > 0 } ?: 0.0
+    val maximum = remember(chart) { chart.bars.filterNotNull().maxOrNull()?.takeIf { it > 0 } ?: 0.0 }
     val description = t.tr("Usage chart. Show readings for a text view.", "Verbruiksgrafiek. Toon metingen voor een tekstweergave.")
     Text("${format.format(maximum)} ${chart.unit}", style = MaterialTheme.typography.labelSmall)
     Canvas(Modifier.fillMaxWidth().height(144.dp).semantics { contentDescription = description }
