@@ -2,8 +2,8 @@
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.CAMERA"/>
     <uses-feature android:name="android.hardware.camera" android:required="false"/>
-    <application android:label="ToonShift" android:allowBackup="false"
-        android:usesCleartextTraffic="false" android:theme="@android:style/Theme.Material.Light.NoActionBar">
+    <application android:label="ToonShift" android:icon="@drawable/toonshift_mark" android:allowBackup="false"
+        android:usesCleartextTraffic="false" android:theme="@android:style/Theme.Material.NoActionBar">
         <activity android:name=".PortraitScanner" android:exported="false"
             android:screenOrientation="portrait" android:theme="@style/zxing_CaptureTheme"/>
         <activity android:name=".MainActivity" android:exported="true">

@@ -6,6 +6,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.viewModels
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -14,6 +15,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -42,14 +44,19 @@ class MainActivity : ComponentActivity() {
         val vault = Vault(applicationContext)
         setContent {
             val dutch = LocalConfiguration.current.locales[0].language == "nl"
-            MaterialTheme(colorScheme = lightColorScheme(primary = androidx.compose.ui.graphics.Color(0xFF14694F))) {
+            val colors = if (isSystemInDarkTheme()) {
+                darkColorScheme(primary = Color(0xFF90DABC), secondaryContainer = Color(0xFF274A40))
+            } else {
+                lightColorScheme(primary = Color(0xFF14694F), secondaryContainer = Color(0xFFD1EEE0))
+            }
+            MaterialTheme(colorScheme = colors) {
                 Surface(modifier = Modifier.fillMaxSize()) { ToonApp(vault, pairing, dutch) }
             }
         }
     }
 }
 
-private class TextKit(val dutch: Boolean) {
+internal class TextKit(val dutch: Boolean) {
     fun tr(en: String, nl: String) = if (dutch) nl else en
     val presets get() = listOf(tr("Comfort","Comfort"), tr("Home","Thuis"), tr("Sleep","Slapen"), tr("Away","Weg"))
     val days get() = if (dutch) listOf("Zo","Ma","Di","Wo","Do","Vr","Za") else listOf("Sun","Mon","Tue","Wed","Thu","Fri","Sat")
@@ -152,20 +159,28 @@ private fun ToonApp(vault: Vault, pairing: PairingViewModel, dutch: Boolean) {
         modifier = Modifier.fillMaxSize().systemBarsPadding(),
         bottomBar = {
             NavigationBar {
-                listOf(t.tr("Thermostat","Thermostaat"),t.tr("Schedule","Programma"),t.tr("Devices","Apparaten")).forEachIndexed { index, label ->
+                listOf(
+                    Triple(0, t.tr("Thermostat", "Thermostaat"), "°"),
+                    Triple(3, t.tr("Energy", "Energie"), "ϟ"),
+                    Triple(1, t.tr("Schedule", "Programma"), "▤"),
+                    Triple(2, t.tr("Devices", "Apparaten"), "▣")
+                ).forEach { (index, label, glyph) ->
                     NavigationBarItem(selected = screen == index, onClick = { screen = index; message = "" },
-                        icon = { Text(listOf("°","▤","▣")[index]) }, label = { Text(label) }, enabled = index == 2 || device != null)
+                        icon = { Text(glyph, style = MaterialTheme.typography.titleLarge) },
+                        label = { Text(label, maxLines = 1) }, enabled = index == 2 || device != null)
                 }
             }
         }
     ) { padding ->
-        Column(Modifier.padding(padding).fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
+        val scroll = key(screen) { rememberScrollState() }
+        Column(Modifier.padding(padding).fillMaxSize().verticalScroll(scroll).padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(15.dp)) {
-            Text("ToonShift", style = MaterialTheme.typography.headlineLarge)
-            if (message.isNotBlank()) Text(message, color = MaterialTheme.colorScheme.error)
+            if (screen != 3) Text("ToonShift", style = MaterialTheme.typography.headlineLarge)
+            if (message.isNotBlank() && screen != 3) Text(message, color = MaterialTheme.colorScheme.error)
             when (screen) {
                 0 -> if (device != null) Thermostat(device, t, status, last, connected, working, write)
                 1 -> if (api != null && device != null) Programme(api, device, connected, t) { message = it }
+                3 -> if (api != null && device != null) EnergyScreen(api, device, t)
                 else -> {
                     Text(t.tr("Paired devices","Gekoppelde apparaten"), style=MaterialTheme.typography.titleLarge)
                     toons.forEach { item ->

@@ -4,10 +4,9 @@ import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.AtomicFile
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.callbackFlow
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
@@ -151,11 +150,22 @@ class ToonApi(private val host: String, fingerprint: String, private val token: 
         }.build()
 
     suspend fun call(path: String, method: String = "GET", data: JSONObject? = null): String =
-        withContext(Dispatchers.IO) {
-            client.newCall(request(path, method, data)).execute().use { response ->
-                if (!response.isSuccessful) throw HttpFailure(response.code)
-                response.body?.string().orEmpty()
-            }
+        suspendCancellableCoroutine { continuation ->
+            val call = client.newCall(request(path, method, data))
+            continuation.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) =
+                    continuation.resumeWith(Result.failure(e))
+
+                override fun onResponse(call: Call, response: Response) {
+                    continuation.resumeWith(runCatching {
+                        response.use {
+                            if (!it.isSuccessful) throw HttpFailure(it.code)
+                            it.body?.string().orEmpty()
+                        }
+                    })
+                }
+            })
         }
 
     fun states() = callbackFlow<JSONObject?> {

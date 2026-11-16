@@ -2,6 +2,8 @@
 
 Android 8 or newer. Pair on your home Wi-Fi, then control your Toon through your NAS's Tailscale subnet route. The app supports room and target temperatures, preset selection, holds, and editing the weekly program.
 
+The Energy tab requires ToonShift 0.2.8 or newer on the thermostat. It shows live electricity and gas and rolling history for electricity, gas, grid export, solar, and water where the Toon has data. Select a time range, tap a bar for its reading, or open the text list. Missing intervals appear as gaps and partial bars are marked separately. The hourly chart shows flow, while longer ranges show usage per interval and the recorded total.
+
 ## Set up
 
 1. Install a ToonShift build with Settings → Remote access and reserve the Toon's LAN address in your router.
