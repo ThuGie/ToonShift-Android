@@ -46,7 +46,8 @@ internal enum class EnergyPeriod(val id: String, val en: String, val nl: String)
 
 internal data class EnergyChart(
     val bars: List<Double?>, val partialBars: List<Boolean>, val unit: String,
-    val total: Double?, val partial: Boolean, val from: Long, val to: Long
+    val total: Double?, val partial: Boolean, val from: Long, val to: Long,
+    val estimatedCost: Double?, val unitPrice: Double?
 ) {
     fun boundary(index: Int): Long = from + ((to - from) * index + bars.size - 1) / bars.size
 
@@ -67,7 +68,9 @@ internal data class EnergyChart(
                 List(coverage.length(), coverage::getBoolean),
                 unit,
                 if (json.isNull("total")) null else json.getDouble("total").also { require(it.isFinite() && it >= 0) },
-                json.getBoolean("partial"), from, to
+                json.getBoolean("partial"), from, to,
+                json.optDouble("estimated_cost_eur").takeIf { it.isFinite() && it >= 0 },
+                json.optDouble("price_eur_per_unit").takeIf { it.isFinite() && it >= 0 }
             )
         }
     }
@@ -104,6 +107,8 @@ internal fun EnergyScreen(api: ToonApi, toon: Toon, t: TextKit) {
     var readingLimit by remember(meter, period) { mutableIntStateOf(12) }
     val locale = if (t.dutch) Locale.forLanguageTag("nl-NL") else Locale.UK
     val format = remember(locale) { NumberFormat.getNumberInstance(locale).apply { maximumFractionDigits = 3 } }
+    val currency = remember(locale) { NumberFormat.getCurrencyInstance(locale).apply { this.currency = java.util.Currency.getInstance("EUR") } }
+    val rate = remember(locale) { NumberFormat.getNumberInstance(locale).apply { minimumFractionDigits = 5; maximumFractionDigits = 5 } }
     val zone = remember(toon.zone) { ZoneId.of(toon.zone) }
 
     LaunchedEffect(api, lifecycle, refresh) {
@@ -199,6 +204,14 @@ internal fun EnergyScreen(api: ToonApi, toon: Toon, t: TextKit) {
                     else t.tr("Recorded total", "Gemeten totaal"), style = MaterialTheme.typography.labelLarge)
                 Text(summary?.let { "${format.format(it)} ${history.unit}" } ?: "—",
                     style = MaterialTheme.typography.headlineMedium)
+                history.estimatedCost?.let { cost ->
+                    Text("${t.tr("Estimated cost", "Geschatte kosten")} · ${currency.format(cost)}",
+                        style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary)
+                }
+                history.unitPrice?.takeIf { period != EnergyPeriod.Hour }?.let { price ->
+                    Text("€${rate.format(price)} / ${history.unit}",
+                        style = MaterialTheme.typography.bodySmall)
+                }
                 Text("$start – $end", style = MaterialTheme.typography.bodySmall)
                 if (history.bars.any { it != null }) {
                     EnergyBars(history, selected, t, format) { selected = it }
