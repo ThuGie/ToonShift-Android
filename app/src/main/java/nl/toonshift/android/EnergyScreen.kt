@@ -75,8 +75,8 @@ internal data class EnergyChart(
 
 private data class LiveEnergy(val value: Double, val unit: String, val measuredAt: Long) {
     companion object {
-        fun parse(body: JSONObject, meter: EnergyMeter, expectedUnit: String, receivedAt: Long): LiveEnergy? {
-            val item = body.optJSONObject(meter.id) ?: return null
+        fun parse(body: JSONObject, key: String, expectedUnit: String, receivedAt: Long): LiveEnergy? {
+            val item = body.optJSONObject(key) ?: return null
             val value = item.optDouble("value")
             val age = item.optLong("age_seconds", -1)
             return if (value.isFinite() && value >= 0 && age >= 0 && age <= receivedAt && item.optString("unit") == expectedUnit)
@@ -85,13 +85,15 @@ private data class LiveEnergy(val value: Double, val unit: String, val measuredA
     }
 }
 
+private data class UsageSnapshot(val electricity: LiveEnergy?, val gas: LiveEnergy?, val recentGasSupported: Boolean)
+
 @Composable
 internal fun EnergyScreen(api: ToonApi, toon: Toon, t: TextKit) {
     var meter by rememberSaveable(toon.id) { mutableStateOf(EnergyMeter.Electricity) }
     var period by rememberSaveable(toon.id) { mutableStateOf(EnergyPeriod.Day) }
     var refresh by remember { mutableIntStateOf(0) }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
-    var live by remember(api) { mutableStateOf<Pair<LiveEnergy?, LiveEnergy?>?>(null) }
+    var live by remember(api) { mutableStateOf<UsageSnapshot?>(null) }
     var liveError by remember(api) { mutableStateOf<Exception?>(null) }
     var liveLoading by remember(api) { mutableStateOf(true) }
     var chart by remember(api, meter, period) { mutableStateOf<EnergyChart?>(null) }
@@ -110,8 +112,13 @@ internal fun EnergyScreen(api: ToonApi, toon: Toon, t: TextKit) {
                 try {
                     val payload = JSONObject(api.call("/v1/energy/live"))
                     val receivedAt = Instant.now().epochSecond
-                    live = LiveEnergy.parse(payload, EnergyMeter.Electricity, "W", receivedAt) to
-                        LiveEnergy.parse(payload, EnergyMeter.Gas, "L/h", receivedAt)
+                    val recent = payload.has("gas_recent")
+                    live = UsageSnapshot(
+                        LiveEnergy.parse(payload, "electricity", "W", receivedAt),
+                        if (recent) LiveEnergy.parse(payload, "gas_recent", "L", receivedAt)
+                        else LiveEnergy.parse(payload, "gas", "L/h", receivedAt),
+                        recent
+                    )
                     liveError = null
                 } catch (e: CancellationException) { throw e }
                 catch (e: Exception) { live = null; liveError = e }
@@ -140,19 +147,28 @@ internal fun EnergyScreen(api: ToonApi, toon: Toon, t: TextKit) {
         PageHeading(t.tr("Energy", "Energie"))
         TextButton(onClick = { refresh++ }) { Text(t.tr("Refresh", "Vernieuwen")) }
     }
-    Text(t.tr("Live usage", "Actueel verbruik"), style = MaterialTheme.typography.titleLarge)
     val current = live
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        for ((type, reading) in listOf(EnergyMeter.Electricity to current?.first, EnergyMeter.Gas to current?.second)) {
-            FilledEnergyCard(Modifier.weight(1f), t.tr(type.en, type.nl),
-                reading?.let { "${format.format(it.value)} ${it.unit}" } ?: "—",
-                reading?.let { date(it.measuredAt, zone, locale, "HH:mm:ss") }
-                    ?: if (liveLoading) t.tr("Loading…", "Laden…") else t.tr("Unavailable", "Niet beschikbaar"))
+    WorkspacePanel(emphasized = true) {
+        SectionHeading(t.tr("Meter readings", "Meterstanden"))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+            val status = if (liveLoading) t.tr("Loading…", "Laden…") else t.tr("Unavailable", "Niet beschikbaar")
+            val watts = current?.electricity
+            MeterValue(Modifier.weight(1f), t.tr("Electricity", "Elektriciteit"),
+                watts?.let { "${format.format(it.value)} ${it.unit}" } ?: "—",
+                watts?.let { date(it.measuredAt, zone, locale, "HH:mm:ss") } ?: status)
+            val gas = current?.gas
+            MeterValue(Modifier.weight(1f), t.tr("Gas", "Gas"),
+                gas?.let { "${format.format(it.value)} ${it.unit}" } ?: "—",
+                when {
+                    current?.recentGasSupported == true && gas != null -> t.tr("Past 5 minutes", "Afgelopen 5 minuten")
+                    current?.recentGasSupported == true -> t.tr("Waiting for a complete sample", "Wachten op volledige meting")
+                    gas != null -> t.tr("Adapter reading", "Adapterwaarde")
+                    else -> status
+                })
         }
     }
     liveError?.let { Text(energyError(it, t), color = MaterialTheme.colorScheme.error) }
-    HorizontalDivider()
-    Text(t.tr("Usage history", "Verbruiksgeschiedenis"), style = MaterialTheme.typography.titleLarge)
+    SectionHeading(t.tr("Usage history", "Verbruiksgeschiedenis"))
     LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         items(EnergyMeter.entries, key = { it.id }) { option ->
             FilterChip(selected = meter == option, onClick = { meter = option }, label = { Text(t.tr(option.en, option.nl)) })
@@ -177,9 +193,9 @@ internal fun EnergyScreen(api: ToonApi, toon: Toon, t: TextKit) {
         val end = date(history.to, zone, locale, "d MMM HH:mm")
         val summary = if (period == EnergyPeriod.Hour) history.bars.filterNotNull().takeIf { it.isNotEmpty() }?.average()
             else history.total
-        ElevatedCard(Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(if (period == EnergyPeriod.Hour) t.tr("Average of recorded flow", "Gemiddelde gemeten stroom")
+        WorkspacePanel {
+                Text(t.tr(meter.en, meter.nl), style = MaterialTheme.typography.titleMedium)
+                Text(if (period == EnergyPeriod.Hour) t.tr("Average measured rate", "Gemiddeld gemeten debiet")
                     else t.tr("Recorded total", "Gemeten totaal"), style = MaterialTheme.typography.labelLarge)
                 Text(summary?.let { "${format.format(it)} ${history.unit}" } ?: "—",
                     style = MaterialTheme.typography.headlineMedium)
@@ -195,7 +211,6 @@ internal fun EnergyScreen(api: ToonApi, toon: Toon, t: TextKit) {
                         "Onvolledige periode. Gele balken bevatten onvolledige gegevens."),
                     color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
                 selected?.let { index -> ReadingRow(history, index, zone, locale, t, format) }
-            }
         }
         if (history.bars.any { it != null }) {
             TextButton(onClick = { showReadings = !showReadings }) {
@@ -215,17 +230,12 @@ internal fun EnergyScreen(api: ToonApi, toon: Toon, t: TextKit) {
 }
 
 @Composable
-private fun FilledEnergyCard(modifier: Modifier, title: String, value: String, detail: String) {
-    Card(modifier, colors = CardDefaults.cardColors(
-        containerColor = MaterialTheme.colorScheme.primaryContainer,
-        contentColor = MaterialTheme.colorScheme.onPrimaryContainer
-    )) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+private fun MeterValue(modifier: Modifier, title: String, value: String, detail: String) {
+        Column(modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(title, style = MaterialTheme.typography.labelLarge)
             Text(value, style = MaterialTheme.typography.headlineSmall)
-            Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(detail, style = MaterialTheme.typography.bodySmall)
         }
-    }
 }
 
 @Composable

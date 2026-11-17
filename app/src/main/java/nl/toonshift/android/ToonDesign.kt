@@ -1,6 +1,7 @@
 package nl.toonshift.android
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
@@ -88,6 +89,28 @@ internal fun PageHeading(title: String, subtitle: String? = null) {
         Text(title, style = MaterialTheme.typography.headlineMedium)
         subtitle?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
     }
+}
+
+@Composable
+internal fun WorkspacePanel(
+    modifier: Modifier = Modifier,
+    emphasized: Boolean = false,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    val colors = MaterialTheme.colorScheme
+    Surface(
+        modifier = modifier.fillMaxWidth(), shape = MaterialTheme.shapes.large,
+        color = if (emphasized) colors.primaryContainer else colors.surface,
+        contentColor = if (emphasized) colors.onPrimaryContainer else colors.onSurface,
+        border = if (emphasized) null else BorderStroke(1.dp, colors.outlineVariant)
+    ) {
+        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp), content = content)
+    }
+}
+
+@Composable
+internal fun SectionHeading(title: String) {
+    Text(title, style = MaterialTheme.typography.titleLarge)
 }
 
 @Composable

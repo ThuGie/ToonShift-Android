@@ -82,6 +82,7 @@ private fun ToonApp(vault: Vault, pairing: PairingViewModel, dutch: Boolean) {
     var screen by rememberSaveable { mutableIntStateOf(if (selected == null) 2 else 0) }
     var message by rememberSaveable { mutableStateOf(if (stored.isFailure) t.tr("Stored credentials could not be opened. Pair again.", "Opgeslagen gegevens konden niet worden geopend. Koppel opnieuw.") else "") }
     var phoneName by rememberSaveable { mutableStateOf("Android") }
+    var revokeId by rememberSaveable { mutableStateOf<String?>(null) }
     val phase by pairing.phase.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val lifecycle = LocalLifecycleOwner.current.lifecycle
@@ -196,10 +197,11 @@ private fun ToonApp(vault: Vault, pairing: PairingViewModel, dutch: Boolean) {
                 1 -> if (api != null && device != null) Programme(api, device, connected, t) { message = it }
                 3 -> if (api != null && device != null) EnergyScreen(api, device, t)
                 else -> {
-                    PageHeading(t.tr("Devices","Apparaten"))
+                    PageHeading(t.tr("Devices","Apparaten"),
+                        t.tr("Manage paired Toons and phone access.", "Beheer gekoppelde Toons en telefoontoegang."))
                     toons.forEach { item ->
-                        Card(Modifier.fillMaxWidth()) {
-                            Row(Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                        WorkspacePanel {
+                            Row(Modifier.fillMaxWidth(),
                                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 TextButton(modifier = Modifier.weight(1f), onClick = { selectedId = item.id; screen = 0 }) {
                                     Column(Modifier.fillMaxWidth()) {
@@ -207,36 +209,26 @@ private fun ToonApp(vault: Vault, pairing: PairingViewModel, dutch: Boolean) {
                                         Text(item.host, style = MaterialTheme.typography.bodySmall)
                                     }
                                 }
-                                TextButton(onClick = {
-                                    scope.launch {
-                                        try {
-                                            val peer = ToonApi(item.host, item.pin, item.token)
-                                            try { peer.call("/v1/device","DELETE") }
-                                            catch (e: HttpFailure) { if (e.status != 401) throw e }
-                                            val remaining = toons.filterNot { it.id == item.id }
-                                            vault.save(remaining)
-                                            toons = remaining
-                                            if (selectedId == item.id) selectedId = remaining.firstOrNull()?.id
-                                        } catch (e: CancellationException) { throw e }
-                                        catch (e: Exception) { message = t.failure(e) }
-                                    }
-                                }) { Text(t.tr("Revoke","Intrekken")) }
+                                TextButton(onClick = { revokeId = item.id }) { Text(t.tr("Revoke","Intrekken")) }
                             }
                         }
                     }
                     when (val progress = phase) {
                         PairingPhase.Connecting -> {
-                            Text(t.tr("Connecting securely to the Toon…","Veilige verbinding met de Toon maken…"))
-                            LinearProgressIndicator(Modifier.fillMaxWidth())
-                            TextButton(onClick={pairing.cancel()}) { Text(t.tr("Cancel","Annuleren")) }
+                            WorkspacePanel {
+                                SectionHeading(t.tr("Connecting to your Toon","Verbinden met je Toon"))
+                                LinearProgressIndicator(Modifier.fillMaxWidth())
+                                TextButton(onClick={pairing.cancel()}) { Text(t.tr("Cancel","Annuleren")) }
+                            }
                         }
                         is PairingPhase.Approval -> {
-                            Text(t.tr("Approve this phone on the Toon","Keur deze telefoon goed op de Toon"),
-                                style=MaterialTheme.typography.titleLarge)
-                            Text(progress.code,style=MaterialTheme.typography.displaySmall)
-                            Text(t.tr("Check that the same code appears on the Toon, then tap Allow control there.",
-                                "Controleer of dezelfde code op de Toon staat en tik daar op Bediening toestaan."))
-                            TextButton(onClick={pairing.cancel()}) { Text(t.tr("Cancel","Annuleren")) }
+                            WorkspacePanel(emphasized = true) {
+                                SectionHeading(t.tr("Confirm on your Toon","Bevestig op je Toon"))
+                                Text(progress.code,style=MaterialTheme.typography.displaySmall)
+                                Text(t.tr("Compare this code with the one on your Toon, then tap Allow control there.",
+                                    "Vergelijk deze code met die op je Toon en tik daar op Bediening toestaan."))
+                                TextButton(onClick={pairing.cancel()}) { Text(t.tr("Cancel","Annuleren")) }
+                            }
                         }
                         is PairingPhase.Paired -> LinearProgressIndicator(Modifier.fillMaxWidth())
                         PairingPhase.Idle, is PairingPhase.Failed -> {
@@ -254,11 +246,14 @@ private fun ToonApp(vault: Vault, pairing: PairingViewModel, dutch: Boolean) {
                                     else -> t.failure(error)
                                 }, color=MaterialTheme.colorScheme.error)
                             }
-                            Text(t.tr("Pair a phone","Telefoon koppelen"), style = MaterialTheme.typography.titleLarge)
-                            Text(t.tr("Use the same Wi-Fi as your Toon during setup.",
-                                "Gebruik tijdens het koppelen hetzelfde wifi-netwerk als je Toon."))
-                            Text(t.tr("On the Toon: Settings → Remote access → Pair phone.",
-                                "Op de Toon: Instellingen → Externe toegang → Telefoon koppelen."))
+                            WorkspacePanel(emphasized = toons.isEmpty()) {
+                            SectionHeading(t.tr("Pair a phone","Telefoon koppelen"))
+                            PairingStep("1", t.tr("Open the QR code", "Open de QR-code"),
+                                t.tr("On your Toon go to Settings → Remote access → Pair phone.",
+                                    "Ga op je Toon naar Instellingen → Externe toegang → Telefoon koppelen."))
+                            PairingStep("2", t.tr("Scan and approve", "Scan en keur goed"),
+                                t.tr("Use the same Wi-Fi, scan below, and confirm on the Toon.",
+                                    "Gebruik hetzelfde wifi-netwerk, scan hieronder en bevestig op de Toon."))
                             OutlinedTextField(value=phoneName,onValueChange={ if (it.toByteArray().size <= 32) phoneName=it },
                                 label={Text(t.tr("Phone name","Telefoonnaam"))},singleLine=true, modifier = Modifier.fillMaxWidth())
                             Button(modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp), onClick={
@@ -267,11 +262,47 @@ private fun ToonApp(vault: Vault, pairing: PairingViewModel, dutch: Boolean) {
                                     .setOrientationLocked(true)
                                     .setPrompt(t.tr("Scan Toon pairing code", "Scan de koppelcode")).setBeepEnabled(false))
                             }) { Text(t.tr("Scan pairing code","Scan koppelcode")) }
+                            }
                         }
                     }
                 }
             }
         }
+        }
+    }
+    toons.firstOrNull { it.id == revokeId }?.let { item ->
+        AlertDialog(
+            onDismissRequest = { revokeId = null },
+            title = { Text(t.tr("Remove access to ${item.name}?", "Toegang tot ${item.name} verwijderen?")) },
+            confirmButton = {
+                TextButton(onClick = {
+                    revokeId = null
+                    scope.launch {
+                        try {
+                            val peer = ToonApi(item.host, item.pin, item.token)
+                            try { peer.call("/v1/device", "DELETE") }
+                            catch (e: HttpFailure) { if (e.status != 401) throw e }
+                            val remaining = toons.filterNot { it.id == item.id }
+                            vault.save(remaining)
+                            toons = remaining
+                            if (selectedId == item.id) selectedId = remaining.firstOrNull()?.id
+                        } catch (e: CancellationException) { throw e }
+                        catch (e: Exception) { message = t.failure(e) }
+                    }
+                }) { Text(t.tr("Revoke access", "Toegang intrekken")) }
+            },
+            dismissButton = { TextButton(onClick = { revokeId = null }) { Text(t.tr("Cancel", "Annuleren")) } }
+        )
+    }
+}
+
+@Composable
+private fun PairingStep(number: String, label: String, detail: String) {
+    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        StatusPill(number, true)
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(label, style = MaterialTheme.typography.titleMedium)
+            Text(detail, style = MaterialTheme.typography.bodyMedium)
         }
     }
 }
@@ -291,11 +322,7 @@ private fun Thermostat(toon: Toon, t: TextKit, status: JSONObject?, last: Instan
         PageHeading(t.tr("Climate", "Klimaat"))
         StatusPill(if (connected) t.tr("Connected","Verbonden") else t.tr("Offline","Offline"), connected)
     }
-    Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(
-        containerColor = MaterialTheme.colorScheme.primaryContainer,
-        contentColor = MaterialTheme.colorScheme.onPrimaryContainer
-    )) {
-        Column(Modifier.padding(22.dp),verticalArrangement=Arrangement.spacedBy(9.dp)) {
+    WorkspacePanel(emphasized = true) {
             Text(t.tr("Room temperature","Kamertemperatuur"))
             Text(temperature(room),style=MaterialTheme.typography.displayMedium)
             if (!connected && last != null) Text("${t.tr("Last confirmed","Laatst bevestigd")} ${time(last)}",
@@ -316,35 +343,39 @@ private fun Thermostat(toon: Toon, t: TextKit, status: JSONObject?, last: Instan
                 }
             }
             if (working) LinearProgressIndicator(Modifier.fillMaxWidth())
-        }
     }
     val heating = status?.optString("burnerInfo")?.toIntOrNull()
-    StatusPill(when (heating.takeIf { connected }) {
+    val heatingLabel = when (heating.takeIf { connected }) {
         0 -> t.tr("Heating idle","Verwarming in rust")
         1 -> t.tr("Heating","Verwarming actief")
         2 -> t.tr("Heating hot water","Warm water opwarmen")
         3 -> t.tr("Preheating","Voorverwarmen")
         else -> t.tr("Heating status unavailable","Verwarmingsstatus onbekend")
-    }, connected && (heating ?: 0) in 1..3)
-    val active = status?.optString("activeState")?.toIntOrNull()?.let(t.presets::getOrNull)
-    if (active != null) Text("${t.tr("Active preset","Actieve stand")} · $active")
+    }
+    val active = status?.optString("activeState")?.toIntOrNull()
     val programmed = status?.optString("programState")
-    Text(when(programmed) {
+    val programmeLabel = when(programmed) {
         "1" -> t.tr("Schedule active","Programma actief")
         "2" -> t.tr("Hold until next period","Vasthouden tot volgende periode")
         "8" -> t.tr("Indefinite hold","Onbeperkt vasthouden")
         "0" -> t.tr("Manual control","Handmatige regeling")
         else -> t.tr("Schedule status unavailable","Programmastatus onbekend")
-    })
-    status?.optString("nextTime")?.toLongOrNull()?.takeIf { it in 1..2147483647 }?.let { next ->
-        Text("${t.tr("Next change","Volgende wijziging")} ${time(Instant.ofEpochSecond(next))} · ${temperature(status.optString("nextSetpoint").toIntOrNull())}")
     }
-    Text(t.tr("Presets","Temperatuurstanden"),style=MaterialTheme.typography.titleLarge)
+    WorkspacePanel {
+        Text(programmeLabel, style = MaterialTheme.typography.titleMedium)
+        StatusPill(heatingLabel, connected && (heating ?: 0) in 1..3)
+        status?.optString("nextTime")?.toLongOrNull()?.takeIf { it in 1..2147483647 }?.let { next ->
+            Text("${t.tr("Next change","Volgende wijziging")} ${time(Instant.ofEpochSecond(next))} · ${temperature(status.optString("nextSetpoint").toIntOrNull())}",
+                style = MaterialTheme.typography.bodyMedium)
+        }
+    }
+    SectionHeading(t.tr("Presets","Temperatuurstanden"))
     for (row in 0..1) {
         Row(horizontalArrangement=Arrangement.spacedBy(10.dp)) {
             for (id in row*2..row*2+1) {
-                OutlinedButton(onClick={write("/v1/preset",JSONObject().put("id",id))},
-                    enabled=connected && !working,modifier=Modifier.weight(1f)) { Text(t.presets[id]) }
+                FilterChip(selected = id == active, onClick = { write("/v1/preset", JSONObject().put("id", id)) },
+                    enabled = connected && !working, modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                    label = { Text(t.presets[id], style = MaterialTheme.typography.titleMedium) })
             }
         }
     }
@@ -422,26 +453,28 @@ private fun Programme(api: ToonApi, toon: Toon, connected: Boolean, t: TextKit, 
             FilterChip(selected=day==index,onClick={day=index},label={Text(name)})
         }
     }
-    if (!connected) Text(t.tr("Disconnected","Niet verbonden"))
+    if (!connected) StatusPill(t.tr("Disconnected","Niet verbonden"), false)
     if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
     val daily = remember(slots, day) { slots.filter { it.start / 1440 == day } }
-    if (daily.isEmpty() && revision.isNotBlank()) Text(t.tr("No periods on this day","Geen perioden op deze dag"))
-    daily.forEach { slot ->
-        ElevatedCard(Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(14.dp)) {
-                Text("${minutesText(slot.start)} – ${minutesText(slot.end)}" + if(slot.end/1440 != day) " · ${t.days[(slot.end/1440)%7]}" else "",
-                    style=MaterialTheme.typography.titleLarge)
-                Text(t.presets.getOrNull(slot.preset) ?: "—")
-                Row {
-                    TextButton(onClick={original=slot;editing=true},enabled=ready) {Text(t.tr("Edit","Bewerken"))}
-                    TextButton(onClick={removing=slot},enabled=ready) {Text(t.tr("Delete","Verwijderen"))}
+    Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+        Button(onClick={original=null;editing=true},enabled=ready, modifier = Modifier.weight(1f)) {Text(t.tr("Add period","Periode toevoegen"))}
+        OutlinedButton(onClick={copying=true},enabled=ready && daily.isNotEmpty(), modifier = Modifier.weight(1f)) {Text(t.tr("Copy day","Dag kopiëren"))}
+    }
+    if (revision.isNotBlank()) WorkspacePanel {
+        if (daily.isEmpty()) Text(t.tr("No periods on this day","Geen perioden op deze dag"))
+        daily.forEachIndexed { index, slot ->
+            if (index > 0) HorizontalDivider()
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween) {
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("${minutesText(slot.start)} – ${minutesText(slot.end)}" + if(slot.end/1440 != day) " · ${t.days[(slot.end/1440)%7]}" else "",
+                        style=MaterialTheme.typography.titleMedium)
+                    Text(t.presets.getOrNull(slot.preset) ?: "—", style = MaterialTheme.typography.bodyMedium)
                 }
+                TextButton(onClick={original=slot;editing=true},enabled=ready) {Text(t.tr("Edit","Bewerken"))}
+                TextButton(onClick={removing=slot},enabled=ready) {Text(t.tr("Delete","Verwijderen"))}
             }
         }
-    }
-    Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-        Button(onClick={original=null;editing=true},enabled=ready) {Text(t.tr("Add period","Periode toevoegen"))}
-        OutlinedButton(onClick={copying=true},enabled=ready && daily.isNotEmpty()) {Text(t.tr("Copy day","Dag kopiëren"))}
     }
     if (editing) {
         PeriodDialog(day,original,t,connected,{editing=false}) { new ->
