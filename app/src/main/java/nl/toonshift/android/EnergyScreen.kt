@@ -49,6 +49,12 @@ internal data class EnergyChart(
     val total: Double?, val partial: Boolean, val from: Long, val to: Long,
     val estimatedCost: Double?, val unitPrice: Double?
 ) {
+    fun intervalCost(index: Int): Double? {
+        if (unit !in setOf("kWh", "m³")) return null
+        val price = unitPrice ?: return null
+        return bars[index]?.times(price)?.takeIf { it.isFinite() }
+    }
+
     fun boundary(index: Int): Long = from + ((to - from) * index + bars.size - 1) / bars.size
 
     companion object {
@@ -94,6 +100,7 @@ private data class UsageSnapshot(val electricity: LiveEnergy?, val gas: LiveEner
 internal fun EnergyScreen(api: ToonApi, toon: Toon, t: TextKit) {
     var meter by rememberSaveable(toon.id) { mutableStateOf(EnergyMeter.Electricity) }
     var period by rememberSaveable(toon.id) { mutableStateOf(EnergyPeriod.Day) }
+    var showCost by rememberSaveable(toon.id) { mutableStateOf(false) }
     var refresh by remember { mutableIntStateOf(0) }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     var live by remember(api) { mutableStateOf<UsageSnapshot?>(null) }
@@ -126,7 +133,7 @@ internal fun EnergyScreen(api: ToonApi, toon: Toon, t: TextKit) {
                     )
                     liveError = null
                 } catch (e: CancellationException) { throw e }
-                catch (e: Exception) { live = null; liveError = e }
+                catch (e: Exception) { liveError = e }
                 finally { liveLoading = false }
                 delay(10_000)
             }
@@ -153,6 +160,10 @@ internal fun EnergyScreen(api: ToonApi, toon: Toon, t: TextKit) {
         TextButton(onClick = { refresh++ }) { Text(t.tr("Refresh", "Vernieuwen")) }
     }
     val current = live
+    fun readingDetail(value: LiveEnergy): String {
+        val timestamp = date(value.measuredAt, zone, locale, "HH:mm:ss")
+        return if (liveError == null) timestamp else "${t.tr("Stale", "Verouderd")} · $timestamp"
+    }
     WorkspacePanel(emphasized = true) {
         SectionHeading(t.tr("Meter readings", "Meterstanden"))
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -160,14 +171,14 @@ internal fun EnergyScreen(api: ToonApi, toon: Toon, t: TextKit) {
             val watts = current?.electricity
             MeterValue(Modifier.weight(1f), t.tr("Electricity", "Elektriciteit"),
                 watts?.let { "${format.format(it.value)} ${it.unit}" } ?: "—",
-                watts?.let { date(it.measuredAt, zone, locale, "HH:mm:ss") } ?: status)
+                watts?.let(::readingDetail) ?: status)
             val gas = current?.gas
             MeterValue(Modifier.weight(1f), t.tr("Gas", "Gas"),
                 gas?.let { "${format.format(it.value)} ${it.unit}" } ?: "—",
                 when {
-                    current?.recentGasSupported == true && gas != null -> t.tr("Past 5 minutes", "Afgelopen 5 minuten")
+                    current?.recentGasSupported == true && gas != null -> "${t.tr("Last 5 minutes", "Afgelopen 5 minuten")} · ${readingDetail(gas)}"
                     current?.recentGasSupported == true -> t.tr("Waiting for a complete sample", "Wachten op volledige meting")
-                    gas != null -> t.tr("Adapter reading", "Adapterwaarde")
+                    gas != null -> readingDetail(gas)
                     else -> status
                 })
         }
@@ -198,6 +209,9 @@ internal fun EnergyScreen(api: ToonApi, toon: Toon, t: TextKit) {
         val end = date(history.to, zone, locale, "d MMM HH:mm")
         val summary = if (period == EnergyPeriod.Hour) history.bars.filterNotNull().takeIf { it.isNotEmpty() }?.average()
             else history.total
+        val costs = remember(history) { history.bars.indices.map(history::intervalCost) }
+        val costAvailable = costs.any { it != null }
+        val costMode = showCost && costAvailable
         WorkspacePanel {
                 Text(t.tr(meter.en, meter.nl), style = MaterialTheme.typography.titleMedium)
                 Text(if (period == EnergyPeriod.Hour) t.tr("Average measured rate", "Gemiddeld gemeten debiet")
@@ -214,7 +228,15 @@ internal fun EnergyScreen(api: ToonApi, toon: Toon, t: TextKit) {
                 }
                 Text("$start – $end", style = MaterialTheme.typography.bodySmall)
                 if (history.bars.any { it != null }) {
-                    EnergyBars(history, selected, t, format) { selected = it }
+                    if (costAvailable) SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                        listOf(false, true).forEachIndexed { index, cost ->
+                            SegmentedButton(selected = costMode == cost, onClick = { showCost = cost },
+                                shape = SegmentedButtonDefaults.itemShape(index, 2), icon = {},
+                                label = { Text(if (cost) t.tr("Cost", "Kosten") else t.tr("Usage", "Verbruik")) })
+                        }
+                    }
+                    val displayed = if (costMode) history.copy(bars = costs, unit = "€") else history
+                    EnergyBars(displayed, selected, t, if (costMode) currency else format) { selected = it }
                     Text(t.tr("Tap a bar for details. Gaps mean missing readings.",
                         "Tik op een balk voor details. Lege plekken zijn ontbrekende metingen."),
                         style = MaterialTheme.typography.bodySmall)
@@ -223,7 +245,7 @@ internal fun EnergyScreen(api: ToonApi, toon: Toon, t: TextKit) {
                     t.tr("Incomplete period. Amber bars contain partial data.",
                         "Onvolledige periode. Gele balken bevatten onvolledige gegevens."),
                     color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
-                selected?.let { index -> ReadingRow(history, index, zone, locale, t, format) }
+                selected?.let { index -> ReadingRow(history, index, zone, locale, t, format, currency) }
         }
         if (history.bars.any { it != null }) {
             TextButton(onClick = { showReadings = !showReadings }) {
@@ -231,7 +253,7 @@ internal fun EnergyScreen(api: ToonApi, toon: Toon, t: TextKit) {
             }
             if (showReadings) {
                 for (i in history.bars.indices.reversed().take(readingLimit)) {
-                    ReadingRow(history, i, zone, locale, t, format)
+                    ReadingRow(history, i, zone, locale, t, format, currency)
                     HorizontalDivider()
                 }
                 if (readingLimit < history.bars.size) TextButton(onClick = { readingLimit += 12 }) {
@@ -258,8 +280,9 @@ private fun EnergyBars(chart: EnergyChart, selected: Int?, t: TextKit, format: N
     val selectedColor = MaterialTheme.colorScheme.onSurface
     val partial = androidx.compose.ui.graphics.Color(0xFFB67928)
     val maximum = remember(chart) { chart.bars.filterNotNull().maxOrNull()?.takeIf { it > 0 } ?: 0.0 }
-    val description = t.tr("Usage chart. Show readings for a text view.", "Verbruiksgrafiek. Toon metingen voor een tekstweergave.")
-    Text("${format.format(maximum)} ${chart.unit}", style = MaterialTheme.typography.labelSmall)
+    val description = if (chart.unit == "€") t.tr("Estimated cost chart.", "Grafiek met geschatte kosten.")
+        else t.tr("Usage chart. Show readings for a text view.", "Verbruiksgrafiek. Toon metingen voor een tekstweergave.")
+    Text(if (chart.unit == "€") format.format(maximum) else "${format.format(maximum)} ${chart.unit}", style = MaterialTheme.typography.labelSmall)
     Canvas(Modifier.fillMaxWidth().height(144.dp).semantics { contentDescription = description }
         .pointerInput(chart) { detectTapGestures { point ->
             select((point.x / size.width * chart.bars.size).toInt().coerceIn(chart.bars.indices))
@@ -287,7 +310,7 @@ private fun EnergyBars(chart: EnergyChart, selected: Int?, t: TextKit, format: N
 }
 
 @Composable
-private fun ReadingRow(chart: EnergyChart, index: Int, zone: ZoneId, locale: Locale, t: TextKit, format: NumberFormat) {
+private fun ReadingRow(chart: EnergyChart, index: Int, zone: ZoneId, locale: Locale, t: TextKit, format: NumberFormat, currency: NumberFormat) {
     val from = date(chart.boundary(index), zone, locale, "d MMM HH:mm")
     val to = date(chart.boundary(index + 1), zone, locale, "d MMM HH:mm")
     val value = chart.bars[index]?.let {
@@ -296,6 +319,10 @@ private fun ReadingRow(chart: EnergyChart, index: Int, zone: ZoneId, locale: Loc
     Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
         Text("$from – $to", style = MaterialTheme.typography.bodySmall)
         Text(value, style = MaterialTheme.typography.titleSmall)
+        chart.intervalCost(index)?.let { cost ->
+            Text("${t.tr("Estimated cost", "Geschatte kosten")} · ${currency.format(cost)}",
+                style = MaterialTheme.typography.bodySmall)
+        }
     }
 }
 

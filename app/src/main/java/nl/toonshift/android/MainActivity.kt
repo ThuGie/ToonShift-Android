@@ -109,6 +109,8 @@ private fun ToonApp(vault: Vault, pairing: PairingViewModel, dutch: Boolean) {
     var status by remember(device) { mutableStateOf<JSONObject?>(null) }
     var last by remember(device) { mutableStateOf<Instant?>(null) }
     var connected by remember(device) { mutableStateOf(false) }
+    var reachableAt by remember(device) { mutableStateOf<Instant?>(null) }
+    var pendingTarget by remember(device) { mutableStateOf<Int?>(null) }
     var working by remember(device) { mutableStateOf(false) }
     val needsStatus = screen == 0 || screen == 1
     LaunchedEffect(api, lifecycle, needsStatus) {
@@ -118,16 +120,17 @@ private fun ToonApp(vault: Vault, pairing: PairingViewModel, dutch: Boolean) {
             while (true) {
                 try {
                     api.states().collect { event ->
+                        reachableAt = Instant.now()
+                        backoff = 1000L
                         if (event == null) {
                             status = null
                             connected = false
                         } else {
-                            if (event.length() > 0) status = event
-                            if (status != null) {
+                            if (event.length() > 0) {
+                                status = event
+                                last = reachableAt
                                 if (!connected) message = ""
                                 connected = true
-                                last = Instant.now()
-                                backoff = 1000L
                             }
                         }
                     }
@@ -142,6 +145,8 @@ private fun ToonApp(vault: Vault, pairing: PairingViewModel, dutch: Boolean) {
     val write: (String, JSONObject) -> Unit = { path, json ->
         if (api != null && connected && !working) {
             working = true
+            val requested = if (path == "/v1/setpoint") json.getInt("centi_celsius") else null
+            pendingTarget = requested
             scope.launch {
                 var failure: Exception? = null
                 try {
@@ -151,11 +156,16 @@ private fun ToonApp(vault: Vault, pairing: PairingViewModel, dutch: Boolean) {
                 try {
                     status = JSONObject(api.call("/v1/status"))
                     last = Instant.now()
-                    message = if (failure == null) "" else
-                        t.tr("Change was not confirmed. Showing the Toon’s current state.", "Wijziging niet bevestigd. De actuele Toon-status wordt getoond.")
+                    reachableAt = last
+                    val confirmed = status?.optString("currentSetpoint")?.toIntOrNull()
+                    message = when {
+                        requested != null && confirmed == requested -> ""
+                        failure == null && requested == null -> ""
+                        else -> t.tr("Change was not confirmed. Showing the Toon’s current state.", "Wijziging niet bevestigd. De actuele Toon-status wordt getoond.")
+                    }
                 } catch (e: CancellationException) { throw e }
                 catch (e: Exception) { connected = false; message = t.failure(e) }
-                finally { working = false }
+                finally { pendingTarget = null; working = false }
             }
         }
     }
@@ -193,7 +203,7 @@ private fun ToonApp(vault: Vault, pairing: PairingViewModel, dutch: Boolean) {
                 contentColor = MaterialTheme.colorScheme.onErrorContainer
             ) { Text(message, Modifier.padding(14.dp)) }
             when (screen) {
-                0 -> if (device != null) Thermostat(device, t, status, last, connected, working, write)
+                0 -> if (device != null) Thermostat(device, t, status, last, reachableAt, connected, working, pendingTarget, write)
                 1 -> if (api != null && device != null) Programme(api, device, connected, t) { message = it }
                 3 -> if (api != null && device != null) EnergyScreen(api, device, t)
                 else -> {
@@ -308,8 +318,8 @@ private fun PairingStep(number: String, label: String, detail: String) {
 }
 
 @Composable
-private fun Thermostat(toon: Toon, t: TextKit, status: JSONObject?, last: Instant?, connected: Boolean,
-                       working: Boolean, write: (String, JSONObject) -> Unit) {
+private fun Thermostat(toon: Toon, t: TextKit, status: JSONObject?, last: Instant?, reachableAt: Instant?,
+                       connected: Boolean, working: Boolean, pendingTarget: Int?, write: (String, JSONObject) -> Unit) {
     val target = status?.optString("currentSetpoint")?.toIntOrNull()
     val room = status?.optString("currentTemp")?.toIntOrNull()
     fun temperature(value: Int?) = value?.let {
@@ -325,7 +335,9 @@ private fun Thermostat(toon: Toon, t: TextKit, status: JSONObject?, last: Instan
     WorkspacePanel(emphasized = true) {
             Text(t.tr("Room temperature","Kamertemperatuur"))
             Text(temperature(room),style=MaterialTheme.typography.displayMedium)
-            if (!connected && last != null) Text("${t.tr("Last confirmed","Laatst bevestigd")} ${time(last)}",
+            if (last != null) Text("${t.tr("Reading received","Meting ontvangen")} ${time(last)}",
+                style = MaterialTheme.typography.bodySmall)
+            if (!connected && reachableAt != null) Text("${t.tr("Last contact", "Laatste contact")} ${time(reachableAt)}",
                 style = MaterialTheme.typography.bodySmall)
             HorizontalDivider(Modifier.padding(vertical = 6.dp))
             Text(t.tr("Target temperature","Doeltemperatuur"),style=MaterialTheme.typography.labelLarge)
@@ -342,6 +354,8 @@ private fun Thermostat(toon: Toon, t: TextKit, status: JSONObject?, last: Instan
                     }
                 }
             }
+            if (pendingTarget != null) Text("${t.tr("Setting target to", "Doel instellen op")} ${temperature(pendingTarget)}",
+                style = MaterialTheme.typography.bodySmall)
             if (working) LinearProgressIndicator(Modifier.fillMaxWidth())
     }
     val heating = status?.optString("burnerInfo")?.toIntOrNull()
