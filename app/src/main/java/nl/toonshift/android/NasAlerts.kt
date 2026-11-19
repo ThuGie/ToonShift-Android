@@ -281,7 +281,15 @@ class NasAlertService : Service() {
         val evidence = alert.optJSONObject("evidence")
         val text = when (alert.getString("rule")) {
             "electricity_high" -> "High electricity usage. The Toon measured ${evidence?.optInt("watts") ?: 0} watts."
-            "gas_high" -> "High gas usage. The Toon measured ${evidence?.optInt("liters") ?: 0} liters in about five minutes."
+            "gas_high" -> {
+                val liters = evidence?.optDouble("liters")?.takeIf { it.isFinite() && it >= 0 }
+                if (liters == null) "Bliss here. The Toon detected a gas usage spike."
+                else {
+                    val format = java.text.NumberFormat.getNumberInstance().apply { maximumFractionDigits = 1 }
+                    val amount = format.format(liters)
+                    "Bliss here. The Toon measured $amount liters of gas in about five minutes. That crossed your gas alert threshold. If you were using hot water, that could explain the spike."
+                }
+            }
             "heat_away" -> "The Toon is requesting heat while the household is set to Away."
             "test_ring" -> if (evidence?.optString("source") == "assistant") "Your ToonShift Home assistant is calling."
                 else "This is a ToonShift Home test call."
@@ -410,7 +418,7 @@ class NasAlertAnswerActivity : Activity() {
         if (text.isEmpty()) return
         clearProposal()
         perform("reply", JSONObject().put("question",text)
-            .put("alert_context",alert.take(180)).put("language",Locale.getDefault().language)) { result ->
+            .put("alert_context",alert.take(300)).put("language",Locale.getDefault().language)) { result ->
             val answer = result.optString("answer")
             val proposed = result.optJSONObject("proposal")
             if (proposed == null) {
