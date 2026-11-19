@@ -409,7 +409,7 @@ class NasAlertAnswerActivity : Activity() {
             val proposed = result.optJSONObject("proposal")
             if (proposed == null) {
                 status.text = answer
-                speak(answer)
+                if (result.optBoolean("generated")) speak(answer)
             } else {
                 pendingId = proposed.getString("id")
                 val before = degrees(proposed.getInt("current_centi_celsius"))
@@ -418,7 +418,7 @@ class NasAlertAnswerActivity : Activity() {
                 status.text = "$answer\n\n$change"
                 approve.visibility = android.view.View.VISIBLE
                 dismissProposal.visibility = android.view.View.VISIBLE
-                speak(change)
+                if (result.optBoolean("generated")) speak(answer)
             }
         }
     }
@@ -440,7 +440,7 @@ class NasAlertAnswerActivity : Activity() {
                 else -> "The Toon could not confirm the change."
             }
             status.text = message
-            speak(message)
+
         }
     }
 
