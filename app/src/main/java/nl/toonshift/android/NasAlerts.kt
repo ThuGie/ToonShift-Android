@@ -284,6 +284,8 @@ class NasAlertAnswerActivity : Activity() {
     private var playbackGeneration = 0
     private var voicePending = false
     private var neuralGreetingStarted = false
+    private var outgoingStarted = false
+    private var queuedSpeech: String? = null
     private var pendingId: String? = null
     private var handsFree = false
     private var active = false
@@ -300,11 +302,36 @@ class NasAlertAnswerActivity : Activity() {
         alert = intent.getStringExtra("text").orEmpty()
         getSystemService(NotificationManager::class.java).cancel(intent.getIntExtra("notification",-1))
         val outgoing = intent.getBooleanExtra("outgoing",false)
+        handsFree = outgoing
         val heading = TextView(this).apply {
-            text = if (outgoing) "Bliss" else alert.ifBlank { "Bliss voice greeting unavailable" }
-            textSize = 24f
+            text = "Bliss"
+            textSize = 34f
+            gravity = android.view.Gravity.CENTER
+            setTextColor(0xffedf5ff.toInt())
         }
-        status = TextView(this).apply { textSize = 17f }
+        val avatar = TextView(this).apply {
+            text = "B"
+            textSize = 45f
+            gravity = android.view.Gravity.CENTER
+            setTextColor(0xff12312d.toInt())
+            background = android.graphics.drawable.GradientDrawable().apply {
+                shape = android.graphics.drawable.GradientDrawable.OVAL
+                setColor(0xff8adfc9.toInt())
+            }
+        }
+        val note = TextView(this).apply {
+            text = "TOONSHIFT HOME"
+            textSize = 12f
+            letterSpacing = 0.16f
+            gravity = android.view.Gravity.CENTER
+            setTextColor(0xffa7bfd6.toInt())
+        }
+        status = TextView(this).apply {
+            textSize = 17f
+            gravity = android.view.Gravity.CENTER
+            setTextColor(0xffd5e4f5.toInt())
+            text = if (outgoing) "Calling Bliss…" else alert.ifBlank { "Voice greeting unavailable" }
+        }
         reply = EditText(this).apply {
             hint = "Reply, e.g. lower the room temperature"
             filters = arrayOf(android.text.InputFilter.LengthFilter(450))
@@ -341,21 +368,53 @@ class NasAlertAnswerActivity : Activity() {
         }
         val voice = Button(this).apply { text = "Speak reply"; setOnClickListener { listenForReply() } }
         val automatic = android.widget.Switch(this).apply {
-            text = "Hands-free conversation"
+            text = "Hands-free"
+            isChecked = handsFree
             setOnCheckedChangeListener { _, enabled ->
                 handsFree = enabled
                 if (enabled && !voicePending && voicePlayer == null && speech?.isSpeaking != true && send.isEnabled && pendingId == null) listenForReply()
                 if (!enabled) stopListening()
             }
         }
-        val close = Button(this).apply { text = "End call"; setOnClickListener { finish() } }
+        val close = Button(this).apply {
+            text = "End call"
+            backgroundTintList = android.content.res.ColorStateList.valueOf(0xffbc354c.toInt())
+            setTextColor(android.graphics.Color.WHITE)
+            setOnClickListener { finish() }
+        }
+        val keyboard = Button(this).apply {
+            text = "Type"
+            setOnClickListener {
+                val show = reply.visibility != android.view.View.VISIBLE
+                reply.visibility = if (show) android.view.View.VISIBLE else android.view.View.GONE
+                send.visibility = reply.visibility
+                if (show) {
+                    stopListening()
+                    reply.requestFocus()
+                    getSystemService(android.view.inputmethod.InputMethodManager::class.java)
+                        .showSoftInput(reply,android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+                }
+            }
+        }
+        reply.visibility = android.view.View.GONE
+        send.visibility = android.view.View.GONE
+        fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
+        val controls = LinearLayout(this).apply {
+            gravity = android.view.Gravity.CENTER
+            listOf(voice,keyboard,close).forEach { addView(it) }
+        }
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            val inset = (24 * resources.displayMetrics.density).toInt()
-            setPadding(inset,inset,inset,inset)
+            gravity = android.view.Gravity.CENTER_HORIZONTAL
+            setBackgroundColor(0xff0e1726.toInt())
+            setPadding(dp(24),dp(44),dp(24),dp(24))
         }
-        listOf(heading,automatic,reply,voice,downloadModel,send,status,approve,dismissProposal,close).forEach { panel.addView(it) }
-        setContentView(ScrollView(this).apply { addView(panel) })
+        val avatarLayout = LinearLayout.LayoutParams(dp(100),dp(100)).apply { bottomMargin = dp(14) }
+        panel.addView(avatar,avatarLayout)
+        listOf(note,heading,status,controls,automatic,downloadModel,approve,dismissProposal,reply,send).forEach { view ->
+            panel.addView(view,LinearLayout.LayoutParams(-1,-2).apply { topMargin = dp(10) })
+        }
+        setContentView(ScrollView(this).apply { isFillViewport = true; addView(panel) })
         speech = TextToSpeech(this) { result ->
             val engine = speech
             if (result == TextToSpeech.SUCCESS && engine != null) {
@@ -373,7 +432,9 @@ class NasAlertAnswerActivity : Activity() {
                         }
                     })
                     speaking = true
-                    if (active && alert.isNotBlank() && !neuralEnabled()) speak(alert)
+                    val next = queuedSpeech ?: if (!outgoing) alert else ""
+                    queuedSpeech = null
+                    if (active && next.isNotBlank() && !neuralEnabled()) speak(next)
                 }
             }
         }
@@ -396,6 +457,7 @@ class NasAlertAnswerActivity : Activity() {
         if (!active || text.isBlank()) return
         if (!neuralEnabled()) {
             if (speaking) speech?.speak(text,TextToSpeech.QUEUE_FLUSH,null,"toonshift-alert")
+            else queuedSpeech = text
             return
         }
         stopVoice()
@@ -664,7 +726,17 @@ class NasAlertAnswerActivity : Activity() {
     override fun onResume() {
         super.onResume()
         active = true
-        if (neuralEnabled() && alert.isNotBlank() && !neuralGreetingStarted) {
+        if (intent.getBooleanExtra("outgoing",false) && !outgoingStarted) {
+            outgoingStarted = true
+            val language = if (neuralEnabled()) "en" else Locale.getDefault().language
+            perform("reply",JSONObject()
+                .put("question","I just called you. Answer the call with a short greeting and invite me to speak. Do not read out the dashboard or propose any action.")
+                .put("language",language)) { result ->
+                val greeting = result.optString("answer")
+                status.text = greeting
+                if (result.optBoolean("generated")) speak(greeting)
+            }
+        } else if (neuralEnabled() && alert.isNotBlank() && !neuralGreetingStarted) {
             neuralGreetingStarted = true
             speak(alert)
         }
