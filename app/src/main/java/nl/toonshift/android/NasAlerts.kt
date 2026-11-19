@@ -15,17 +15,13 @@ import android.media.AudioAttributes
 import android.media.RingtoneManager
 import android.os.Build
 import android.os.Bundle
-import android.os.Handler
 import android.os.IBinder
-import android.os.Looper
-import android.provider.Settings
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.speech.tts.Voice
-import android.text.InputType
 import android.view.Gravity
 import android.widget.Button
 import android.widget.EditText
@@ -47,8 +43,8 @@ import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLContext
 import javax.net.ssl.X509TrustManager
 
-private fun Context.alertVault() = Vault(this, "nas-alert-config", "toonshift-nas-alert-v1")
-private fun Context.alertPrefs() = getSharedPreferences("nas-alert-status", Context.MODE_PRIVATE)
+internal fun Context.alertVault() = Vault(this, "nas-alert-config", "toonshift-nas-alert-v1")
+internal fun Context.alertPrefs() = getSharedPreferences("nas-alert-status", Context.MODE_PRIVATE)
 
 private fun TextToSpeech.offlineVoices(): List<Voice> =
     voices.orEmpty().filter { !it.isNetworkConnectionRequired &&
@@ -109,7 +105,7 @@ class BlissVoiceActivity : Activity() {
     override fun onDestroy() { engine?.shutdown(); super.onDestroy() }
 }
 
-private data class AlertConfig(val url: String, val key: String, val pin: String) {
+internal data class AlertConfig(val url: String, val key: String, val pin: String) {
     fun client(): OkHttpClient {
         val builder = OkHttpClient.Builder().followRedirects(false).followSslRedirects(false)
             .callTimeout(8, TimeUnit.SECONDS)
@@ -146,110 +142,6 @@ private data class AlertConfig(val url: String, val key: String, val pin: String
             require(pin.isEmpty() || Regex("[0-9a-f]{64}").matches(pin))
             return AlertConfig(url.toString(),key,pin)
         }
-    }
-}
-
-class NasAlertsActivity : Activity() {
-    private val handler = Handler(Looper.getMainLooper())
-    private lateinit var delivery: TextView
-    private val refreshDelivery = object : Runnable {
-        override fun run() {
-            val prefs = alertPrefs()
-            val checked = prefs.getLong("last-check", 0)
-            val received = prefs.getLong("last-ring", 0)
-            val current = System.currentTimeMillis()
-            val status = when {
-                !getSystemService(NotificationManager::class.java).areNotificationsEnabled() ->
-                    "Android has blocked ToonShift notifications."
-                checked > 0 && current - checked > 60_000 ->
-                    "No recent check-in. Start listening and check Tailscale."
-                else -> prefs.getString("status", "Alerts are off.").orEmpty()
-            }
-            val lastRing = if (received == 0L) "No ring received on this phone yet."
-                else "Last ring received " + java.text.DateFormat.getDateTimeInstance().format(java.util.Date(received))
-            delivery.text = "$status\n$lastRing"
-            handler.postDelayed(this, 1000)
-        }
-    }
-
-    override fun onResume() {
-        super.onResume()
-        handler.post(refreshDelivery)
-    }
-
-    override fun onPause() {
-        handler.removeCallbacks(refreshDelivery)
-        super.onPause()
-    }
-
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        title = "ToonShift Home"
-        val panel = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            val inset = (24 * resources.displayMetrics.density).toInt()
-            setPadding(inset,inset,inset,inset)
-        }
-        val titleView = TextView(this).apply { text = "NAS alerts"; textSize = 26f }
-        val help = TextView(this).apply {
-            text = "In ToonShift Home, choose Pair Android. Paste the pairing text here. Keep Tailscale connected when away."
-        }
-        val pairing = EditText(this).apply {
-            hint = "Paste NAS pairing text"
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-            setSingleLine(true)
-            importantForAutofill = android.view.View.IMPORTANT_FOR_AUTOFILL_NO
-        }
-        val address = EditText(this).apply {
-            hint = "Optional HTTPS address over Tailscale"
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
-        }
-        val feedback = TextView(this)
-        delivery = TextView(this)
-        val enable = Button(this).apply { text = "Start listening" }
-        val stop = Button(this).apply { text = "Stop listening" }
-        val notificationSettings = Button(this).apply {
-            text = "Incoming alert sound settings"
-            setOnClickListener {
-                val settings = Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
-                    .putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
-                    .putExtra(Settings.EXTRA_CHANNEL_ID, "nas-rings")
-                startActivity(settings)
-            }
-        }
-        val existing = runCatching { alertVault().load().singleOrNull() }.getOrNull()
-        if (existing != null) address.setText(existing.host)
-        enable.setOnClickListener {
-            if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-                requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
-                return@setOnClickListener
-            }
-            try {
-                val pending = pairing.text.toString().trim()
-                if (pending.isNotEmpty()) {
-                    val config = AlertConfig.parse(pending,address.text.toString())
-                    alertVault().save(listOf(Toon("nas","NAS",config.url,config.pin,config.key,"")))
-                    alertPrefs().edit().remove("cursor").remove("cursor-time").apply()
-                    pairing.text.clear()
-                } else {
-                    require(alertVault().load().isNotEmpty())
-                }
-                startForegroundService(Intent(this,NasAlertService::class.java))
-                feedback.text = "Connecting. Use Test ring on the NAS dashboard."
-            } catch (_: Exception) {
-                feedback.text = "Could not start. Check the pairing text and HTTPS address."
-            }
-        }
-        stop.setOnClickListener {
-            stopService(Intent(this,NasAlertService::class.java))
-            feedback.text = "Alerts are off."
-        }
-        val voiceSettings = Button(this).apply {
-            text = "Bliss voice"
-            setOnClickListener { startActivity(Intent(context,BlissVoiceActivity::class.java)) }
-        }
-        listOf(titleView,help,pairing,address,enable,stop,notificationSettings,voiceSettings,feedback,delivery).forEach { panel.addView(it) }
-        setContentView(ScrollView(this).apply { addView(panel) })
     }
 }
 
@@ -387,6 +279,11 @@ class NasAlertAnswerActivity : Activity() {
     private lateinit var downloadModel: Button
     private val speechLanguage get() = Locale.getDefault().language
     private var speaking = false
+    private var voicePlayer: android.media.MediaPlayer? = null
+    private var voiceFile: java.io.File? = null
+    private var playbackGeneration = 0
+    private var voicePending = false
+    private var neuralGreetingStarted = false
     private var pendingId: String? = null
     private var handsFree = false
     private var active = false
@@ -443,7 +340,7 @@ class NasAlertAnswerActivity : Activity() {
             text = "Hands-free conversation"
             setOnCheckedChangeListener { _, enabled ->
                 handsFree = enabled
-                if (enabled && speech?.isSpeaking != true && send.isEnabled && pendingId == null) listenForReply()
+                if (enabled && !voicePending && voicePlayer == null && speech?.isSpeaking != true && send.isEnabled && pendingId == null) listenForReply()
                 if (!enabled) stopListening()
             }
         }
@@ -472,14 +369,89 @@ class NasAlertAnswerActivity : Activity() {
                         }
                     })
                     speaking = true
-                    if (active && alert.isNotBlank()) speak(alert)
+                    if (active && alert.isNotBlank() && !neuralEnabled()) speak(alert)
                 }
             }
         }
     }
 
+    private fun neuralEnabled(): Boolean =
+        alertPrefs().getString("bliss-voice-mode","offline") in setOf("stella", "tide")
+
+    private fun stopVoice() {
+        playbackGeneration++
+        voicePending = false
+        voicePlayer?.release()
+        voicePlayer = null
+        voiceFile?.delete()
+        voiceFile = null
+        speech?.stop()
+    }
+
     private fun speak(text: String) {
-        if (active && speaking) speech?.speak(text,TextToSpeech.QUEUE_FLUSH,null,"toonshift-alert")
+        if (!active || text.isBlank()) return
+        if (!neuralEnabled()) {
+            if (speaking) speech?.speak(text,TextToSpeech.QUEUE_FLUSH,null,"toonshift-alert")
+            return
+        }
+        stopVoice()
+        voicePending = true
+        val generation = playbackGeneration
+        val voice = alertPrefs().getString("bliss-voice-mode","stella")
+        val context = applicationContext
+        Thread {
+            val audio = runCatching {
+                val saved = context.alertVault().load().single()
+                val config = AlertConfig(saved.host,saved.token,saved.pin)
+                val url = requireNotNull(config.url.toHttpUrl().resolve("api/v1/phone/voice"))
+                val data = JSONObject().put("text",text.take(1100)).put("voice",voice)
+                val request = Request.Builder().url(url).header("Authorization","Bearer ${config.key}")
+                    .post(data.toString().toRequestBody("application/json".toMediaType())).build()
+                config.client().newBuilder().callTimeout(27,TimeUnit.SECONDS).build()
+                    .newCall(request).execute().use { response ->
+                        check(response.isSuccessful)
+                        val source = requireNotNull(response.body).source()
+                        val buffer = okio.Buffer()
+                        var total = 0L
+                        while (true) {
+                            val read = source.read(buffer,8192)
+                            if (read == -1L) break
+                            total += read
+                            require(total <= 8 * 1024 * 1024)
+                        }
+                        val file = java.io.File.createTempFile("bliss-voice-", ".wav",context.cacheDir)
+                        try { file.writeBytes(buffer.readByteArray()) } catch (error: Exception) { file.delete(); throw error }
+                        file
+                    }
+            }.getOrNull()
+            runOnUiThread {
+                if (!active || playbackGeneration != generation) {
+                    audio?.delete()
+                    return@runOnUiThread
+                }
+                voicePending = false
+                if (audio == null) {
+                    status.text = status.text.toString() + "\nNeural voice unavailable. Check NAS replies and its AI allowance."
+                    return@runOnUiThread
+                }
+                voiceFile = audio
+                try {
+                    val player = android.media.MediaPlayer()
+                    voicePlayer = player
+                    player.setAudioAttributes(AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
+                    player.setDataSource(audio.absolutePath)
+                    player.setOnPreparedListener { if (active && voicePlayer === player) it.start() }
+                    player.setOnCompletionListener {
+                        stopVoice()
+                        if (active && handsFree && send.isEnabled && pendingId == null) listenForReply()
+                    }
+                    player.setOnErrorListener { _, _, _ -> stopVoice(); true }
+                    player.prepareAsync()
+                } catch (_: Exception) { stopVoice() }
+            }
+        }.start()
     }
 
     private fun listenForReply() {
@@ -488,7 +460,7 @@ class NasAlertAnswerActivity : Activity() {
             requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 2)
             return
         }
-        speech?.stop()
+        stopVoice()
         stopListening()
         if (Build.VERSION.SDK_INT < 31 || !SpeechRecognizer.isOnDeviceRecognitionAvailable(this)) {
             startOfflineReply()
@@ -602,7 +574,7 @@ class NasAlertAnswerActivity : Activity() {
         stopListening()
         clearProposal()
         perform("reply", JSONObject().put("question",text)
-            .put("alert_context",alert.take(180)).put("language",Locale.getDefault().language)
+            .put("alert_context",alert.take(180)).put("language",if (neuralEnabled()) "en" else Locale.getDefault().language)
             .put("history",org.json.JSONArray(history.toList()))) { result ->
             val answer = result.optString("answer")
             if (result.optBoolean("generated")) {
@@ -688,12 +660,16 @@ class NasAlertAnswerActivity : Activity() {
     override fun onResume() {
         super.onResume()
         active = true
+        if (neuralEnabled() && alert.isNotBlank() && !neuralGreetingStarted) {
+            neuralGreetingStarted = true
+            speak(alert)
+        }
     }
 
     override fun onPause() {
         active = false
         stopListening()
-        speech?.stop()
+        stopVoice()
         super.onPause()
     }
     override fun onDestroy() {
