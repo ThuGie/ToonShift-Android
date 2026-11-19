@@ -24,6 +24,7 @@ import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import android.speech.tts.Voice
 import android.text.InputType
 import android.view.Gravity
 import android.widget.Button
@@ -48,6 +49,65 @@ import javax.net.ssl.X509TrustManager
 
 private fun Context.alertVault() = Vault(this, "nas-alert-config", "toonshift-nas-alert-v1")
 private fun Context.alertPrefs() = getSharedPreferences("nas-alert-status", Context.MODE_PRIVATE)
+
+private fun TextToSpeech.offlineVoices(): List<Voice> =
+    voices.orEmpty().filter { !it.isNetworkConnectionRequired &&
+        TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED !in it.features }
+        .sortedWith(compareByDescending<Voice> { it.locale == Locale.getDefault() }
+            .thenByDescending { it.locale.language == Locale.getDefault().language }
+            .thenByDescending { it.locale.language == "en" }
+            .thenByDescending { it.quality }.thenBy { it.latency }.thenBy { it.name })
+
+class BlissVoiceActivity : Activity() {
+    private var engine: TextToSpeech? = null
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        val panel = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(32,32,32,32) }
+        val status = TextView(this).apply { text = "Loading offline voices…"; textSize = 18f }
+        val options = android.widget.Spinner(this)
+        val preview = Button(this).apply { text = "Preview voice"; isEnabled = false }
+        val save = Button(this).apply { text = "Use this voice"; isEnabled = false }
+        listOf(status,options,preview,save).forEach { panel.addView(it) }
+        setContentView(panel)
+        engine = TextToSpeech(this) { result ->
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                val tts = engine
+                val voices = if (result == TextToSpeech.SUCCESS) tts?.offlineVoices().orEmpty() else emptyList()
+                if (tts == null || voices.isEmpty()) {
+                    status.text = "No offline voices are installed. Add an offline voice in Android’s text-to-speech settings."
+                    return@runOnUiThread
+                }
+                status.text = "Bliss voice"
+                val labels = listOf("Automatic · best match") + voices.map {
+                    "${it.locale.getDisplayName(Locale.getDefault())} · ${it.name}"
+                }
+                options.adapter = android.widget.ArrayAdapter(this,android.R.layout.simple_spinner_dropdown_item,labels)
+                val savedVoice = alertPrefs().getString("bliss-voice",null)
+                options.setSelection(voices.indexOfFirst { it.name == savedVoice } + 1)
+                preview.isEnabled = true
+                save.isEnabled = true
+                preview.setOnClickListener {
+                    val voice = voices.getOrNull(options.selectedItemPosition - 1) ?: voices.first()
+                    tts.voice = voice
+                    tts.setSpeechRate(0.94f)
+                    val sample = if (voice.locale.language == "nl") "Dit is een voorbeeld van de stem van Bliss."
+                        else "This is a preview of the Bliss voice."
+                    tts.speak(sample,TextToSpeech.QUEUE_FLUSH,null,"bliss-preview")
+                }
+                save.setOnClickListener {
+                    val selected = voices.getOrNull(options.selectedItemPosition - 1)
+                    alertPrefs().edit().putString("bliss-voice",selected?.name).apply()
+                    finish()
+                }
+            }
+        }
+    }
+
+    override fun onPause() { engine?.stop(); super.onPause() }
+    override fun onDestroy() { engine?.shutdown(); super.onDestroy() }
+}
 
 private data class AlertConfig(val url: String, val key: String, val pin: String) {
     fun client(): OkHttpClient {
@@ -184,7 +244,11 @@ class NasAlertsActivity : Activity() {
             stopService(Intent(this,NasAlertService::class.java))
             feedback.text = "Alerts are off."
         }
-        listOf(titleView,help,pairing,address,enable,stop,notificationSettings,feedback,delivery).forEach { panel.addView(it) }
+        val voiceSettings = Button(this).apply {
+            text = "Bliss voice"
+            setOnClickListener { startActivity(Intent(context,BlissVoiceActivity::class.java)) }
+        }
+        listOf(titleView,help,pairing,address,enable,stop,notificationSettings,voiceSettings,feedback,delivery).forEach { panel.addView(it) }
         setContentView(ScrollView(this).apply { addView(panel) })
     }
 }
@@ -394,12 +458,12 @@ class NasAlertAnswerActivity : Activity() {
         speech = TextToSpeech(this) { result ->
             val engine = speech
             if (result == TextToSpeech.SUCCESS && engine != null) {
-                val language = Locale.getDefault().language
-                val offline = engine.voices.orEmpty().filter { !it.isNetworkConnectionRequired }
-                val selected = offline.firstOrNull { it.locale.language == language }
-                    ?: offline.firstOrNull { it.locale.language == Locale.ENGLISH.language }
+                val offline = engine.offlineVoices()
+                val savedVoice = alertPrefs().getString("bliss-voice",null)
+                val selected = offline.firstOrNull { it.name == savedVoice } ?: offline.firstOrNull()
                 if (selected != null) {
                     engine.voice = selected
+                    engine.setSpeechRate(0.94f)
                     engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                         override fun onStart(id: String?) = Unit
                         override fun onError(id: String?) = Unit

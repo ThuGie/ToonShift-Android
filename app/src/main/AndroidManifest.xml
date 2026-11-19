@@ -17,6 +17,7 @@
         </service>
         <receiver android:name=".NasDeclineReceiver" android:exported="false"/>
         <activity android:name=".NasAlertsActivity" android:exported="false"/>
+        <activity android:name=".BlissVoiceActivity" android:exported="false"/>
         <activity android:name=".NasAlertAnswerActivity" android:exported="false"/>
         <activity android:name=".PortraitScanner" android:exported="false"
             android:screenOrientation="portrait" android:theme="@style/zxing_CaptureTheme"/>
