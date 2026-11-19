@@ -15,6 +15,7 @@
         <service android:name=".NasAlertService" android:exported="false" android:foregroundServiceType="specialUse">
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="User-enabled persistent private NAS link for urgent home energy alerts"/>
         </service>
+        <receiver android:name=".NasDeclineReceiver" android:exported="false"/>
         <activity android:name=".NasAlertsActivity" android:exported="false"/>
         <activity android:name=".NasAlertAnswerActivity" android:exported="false"/>
         <activity android:name=".PortraitScanner" android:exported="false"

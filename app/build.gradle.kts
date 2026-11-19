@@ -10,8 +10,8 @@ android {
         applicationId = "nl.toonshift.android"
         minSdk = 26
         targetSdk = 35
-        versionCode = 13
-        versionName = "0.4.8"
+        versionCode = 14
+        versionName = "0.4.9"
     }
     buildFeatures { compose = true }
     compileOptions {
@@ -30,6 +30,8 @@ android {
     buildTypes { getByName("release") { signingConfig = signingConfigs.findByName("github") } }
 }
 dependencies {
+    implementation("com.alphacephei:vosk-android:0.3.75@aar")
+    implementation("net.java.dev.jna:jna:5.18.1@aar")
     implementation("androidx.activity:activity-compose:1.10.1")
     implementation("androidx.compose.material3:material3:1.3.2")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")

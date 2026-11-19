@@ -7,6 +7,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -22,6 +23,7 @@ import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.text.InputType
 import android.view.Gravity
 import android.widget.Button
@@ -283,10 +285,20 @@ class NasAlertService : Service() {
         val greeting = alert.optString("greeting").takeUnless { it.isBlank() || it == "null" }
         val answer = PendingIntent.getActivity(this,id,Intent(this,NasAlertAnswerActivity::class.java)
             .putExtra("text",greeting).putExtra("notification",id),PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-        manager.notify(id,Notification.Builder(this,"nas-rings").setSmallIcon(android.R.drawable.ic_dialog_info)
+        val decline = PendingIntent.getBroadcast(this,id, Intent(this,NasDeclineReceiver::class.java)
+            .putExtra("notification",id),PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        val builder = Notification.Builder(this,"nas-rings").setSmallIcon(android.R.drawable.ic_dialog_info)
             .setCategory(Notification.CATEGORY_CALL).setVisibility(Notification.VISIBILITY_PRIVATE)
-            .setContentTitle("Bliss · ToonShift Home").setContentText(greeting ?: "Voice greeting unavailable").setContentIntent(answer).setAutoCancel(true)
-            .addAction(Notification.Action.Builder(null,"Answer",answer).build()).build())
+            .setContentTitle("Bliss · ToonShift Home").setContentText(greeting ?: "Voice greeting unavailable")
+            .setContentIntent(answer).setAutoCancel(true).setTimeoutAfter(45_000)
+        if (Build.VERSION.SDK_INT >= 31) {
+            val caller = android.app.Person.Builder().setName("Bliss").setImportant(true).build()
+            builder.setStyle(Notification.CallStyle.forIncomingCall(caller,decline,answer))
+        } else {
+            builder.addAction(Notification.Action.Builder(null,"Decline",decline).build())
+                .addAction(Notification.Action.Builder(null,"Answer",answer).build())
+        }
+        manager.notify(id,builder.build().apply { flags = flags or Notification.FLAG_INSISTENT })
     }
 
     override fun onDestroy() {
@@ -296,11 +308,25 @@ class NasAlertService : Service() {
     }
 }
 
+class NasDeclineReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        context.getSystemService(NotificationManager::class.java).cancel(intent.getIntExtra("notification",-1))
+    }
+}
+
 class NasAlertAnswerActivity : Activity() {
     private var speech: TextToSpeech? = null
     private var recognizer: SpeechRecognizer? = null
+    private var offlineModel: org.vosk.Model? = null
+    private var offlineRecognizer: org.vosk.Recognizer? = null
+    private var offlineSpeech: org.vosk.android.SpeechService? = null
+    private lateinit var downloadModel: Button
+    private val speechLanguage get() = Locale.getDefault().language
     private var speaking = false
     private var pendingId: String? = null
+    private var handsFree = false
+    private var active = false
+    private val history = ArrayDeque<JSONObject>()
     private lateinit var alert: String
     private lateinit var reply: EditText
     private lateinit var status: TextView
@@ -329,14 +355,41 @@ class NasAlertAnswerActivity : Activity() {
             visibility = android.view.View.GONE
             setOnClickListener { clearProposal(); status.text = "Proposal dismissed." }
         }
+        downloadModel = Button(this).apply {
+            text = "Download offline speech (about 40 MB)"
+            visibility = android.view.View.GONE
+            setOnClickListener {
+                isEnabled = false
+                status.text = "Downloading the speech model…"
+                Thread {
+                    val result = runCatching { OfflineSpeechModel.download(applicationContext,speechLanguage) }
+                    runOnUiThread {
+                        if (isDestroyed || isFinishing) return@runOnUiThread
+                        isEnabled = true
+                        if (result.isSuccess) {
+                            visibility = android.view.View.GONE
+                            status.text = "Offline speech is ready. Tap Speak reply."
+                        } else status.text = "Speech model download failed. Check your connection and try again."
+                    }
+                }.start()
+            }
+        }
         val voice = Button(this).apply { text = "Speak reply"; setOnClickListener { listenForReply() } }
+        val automatic = android.widget.Switch(this).apply {
+            text = "Hands-free conversation"
+            setOnCheckedChangeListener { _, enabled ->
+                handsFree = enabled
+                if (enabled && speech?.isSpeaking != true && send.isEnabled && pendingId == null) listenForReply()
+                if (!enabled) stopListening()
+            }
+        }
         val close = Button(this).apply { text = "End call"; setOnClickListener { finish() } }
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             val inset = (24 * resources.displayMetrics.density).toInt()
             setPadding(inset,inset,inset,inset)
         }
-        listOf(heading,reply,voice,send,status,approve,dismissProposal,close).forEach { panel.addView(it) }
+        listOf(heading,automatic,reply,voice,downloadModel,send,status,approve,dismissProposal,close).forEach { panel.addView(it) }
         setContentView(ScrollView(this).apply { addView(panel) })
         speech = TextToSpeech(this) { result ->
             val engine = speech
@@ -345,28 +398,41 @@ class NasAlertAnswerActivity : Activity() {
                 val offline = engine.voices.orEmpty().filter { !it.isNetworkConnectionRequired }
                 val selected = offline.firstOrNull { it.locale.language == language }
                     ?: offline.firstOrNull { it.locale.language == Locale.ENGLISH.language }
-                if (selected != null) { engine.voice = selected; speaking = true; if (alert.isNotBlank()) speak(alert) }
+                if (selected != null) {
+                    engine.voice = selected
+                    engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                        override fun onStart(id: String?) = Unit
+                        override fun onError(id: String?) = Unit
+                        override fun onDone(id: String?) {
+                            runOnUiThread { if (active && handsFree && send.isEnabled && pendingId == null) listenForReply() }
+                        }
+                    })
+                    speaking = true
+                    if (active && alert.isNotBlank()) speak(alert)
+                }
             }
         }
     }
 
     private fun speak(text: String) {
-        if (speaking) speech?.speak(text,TextToSpeech.QUEUE_FLUSH,null,"toonshift-alert")
+        if (active && speaking) speech?.speak(text,TextToSpeech.QUEUE_FLUSH,null,"toonshift-alert")
     }
 
     private fun listenForReply() {
-        if (Build.VERSION.SDK_INT < 31 || !SpeechRecognizer.isOnDeviceRecognitionAvailable(this)) {
-            status.text = "Offline speech recognition is unavailable. You can type a reply."
-            return
-        }
+        if (!active || !send.isEnabled || pendingId != null) return
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 2)
             return
         }
         speech?.stop()
+        stopListening()
+        if (Build.VERSION.SDK_INT < 31 || !SpeechRecognizer.isOnDeviceRecognitionAvailable(this)) {
+            startOfflineReply()
+            return
+        }
         recognizer?.destroy()
         val local = runCatching { SpeechRecognizer.createOnDeviceSpeechRecognizer(this) }.getOrElse {
-            status.text = "Offline speech recognition is unavailable. You can type a reply."
+            startOfflineReply()
             return
         }
         recognizer = local
@@ -374,12 +440,14 @@ class NasAlertAnswerActivity : Activity() {
             override fun onReadyForSpeech(params: Bundle?) { status.text = "Listening…" }
             override fun onResults(results: Bundle?) {
                 val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
-                if (text != null) {
-                    reply.setText(text.take(450))
-                    status.text = "Review the text and tap Send reply."
-                } else status.text = "No speech recognized. Try again or type a reply."
+                acceptTranscript(text)
             }
-            override fun onError(error: Int) { status.text = "Speech recognition is unavailable. Try typing your reply." }
+            override fun onError(error: Int) {
+                if (recognizer !== local || !active || error == SpeechRecognizer.ERROR_CLIENT) return
+                if (error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT)
+                    status.text = "No speech recognized. Tap Speak reply to try again."
+                else startOfflineReply()
+            }
             override fun onBeginningOfSpeech() = Unit
             override fun onRmsChanged(rmsdB: Float) = Unit
             override fun onBufferReceived(buffer: ByteArray?) = Unit
@@ -393,6 +461,71 @@ class NasAlertAnswerActivity : Activity() {
             .putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE,true))
     }
 
+    private fun acceptTranscript(text: String?) {
+        if (!active) return
+        if (text.isNullOrBlank()) {
+            status.text = "No speech recognized. Try again or type a reply."
+            return
+        }
+        reply.setText(text.take(450))
+        if (handsFree && send.isEnabled && pendingId == null) sendReply()
+        else status.text = "Review the text and tap Send reply."
+    }
+
+    private fun stopListening() {
+        recognizer?.cancel()
+        offlineSpeech?.cancel()
+    }
+
+    @android.annotation.SuppressLint("MissingPermission")
+    private fun startOfflineReply() {
+        val modelPath = OfflineSpeechModel.installed(this,speechLanguage)
+        if (modelPath == null) {
+            downloadModel.visibility = android.view.View.VISIBLE
+            status.text = "Android offline speech is unavailable for this language. Download the local speech model or type a reply."
+            return
+        }
+        recognizer?.destroy()
+        recognizer = null
+        offlineSpeech?.shutdown()
+        offlineRecognizer?.close()
+        offlineSpeech = null
+        offlineRecognizer = null
+        try {
+            val model = offlineModel ?: org.vosk.Model(modelPath.absolutePath).also { offlineModel = it }
+            val decoder = org.vosk.Recognizer(model,16_000f).also { offlineRecognizer = it }
+            val service = org.vosk.android.SpeechService(decoder,16_000f).also { offlineSpeech = it }
+            val listener = object : org.vosk.android.RecognitionListener {
+                private var finished = false
+                private fun accept(hypothesis: String?) {
+                    if (finished || offlineSpeech !== service || !active) return
+                    val text = runCatching { JSONObject(hypothesis.orEmpty()).optString("text") }.getOrNull()
+                    if (text.isNullOrBlank()) return
+                    finished = true
+                    service.cancel()
+                    acceptTranscript(text)
+                }
+                override fun onPartialResult(hypothesis: String?) = Unit
+                override fun onResult(hypothesis: String?) = accept(hypothesis)
+                override fun onFinalResult(hypothesis: String?) = accept(hypothesis)
+                override fun onError(exception: Exception?) {
+                    if (offlineSpeech === service && active) status.text = "Could not start offline recognition."
+                }
+                override fun onTimeout() {
+                    if (!finished && offlineSpeech === service && active) status.text = "No speech recognized. Tap Speak reply again."
+                }
+            }
+            if (service.startListening(listener,12_000)) status.text = "Listening offline…"
+        } catch (_: Exception) {
+            status.text = "Could not start offline recognition. You can type a reply."
+        }
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, results: IntArray) {
+        super.onRequestPermissionsResult(requestCode,permissions,results)
+        if (requestCode == 2 && results.firstOrNull() == PackageManager.PERMISSION_GRANTED) listenForReply()
+    }
+
     private fun clearProposal() {
         pendingId = null
         approve.visibility = android.view.View.GONE
@@ -401,11 +534,19 @@ class NasAlertAnswerActivity : Activity() {
 
     private fun sendReply() {
         val text = reply.text.toString().trim()
-        if (text.isEmpty()) return
+        if (text.isEmpty() || !send.isEnabled || !active) return
+        stopListening()
         clearProposal()
         perform("reply", JSONObject().put("question",text)
-            .put("alert_context",alert.take(300)).put("language",Locale.getDefault().language)) { result ->
+            .put("alert_context",alert.take(180)).put("language",Locale.getDefault().language)
+            .put("history",org.json.JSONArray(history.toList()))) { result ->
             val answer = result.optString("answer")
+            if (result.optBoolean("generated")) {
+                history.addLast(JSONObject().put("role","user").put("text",text))
+                history.addLast(JSONObject().put("role","assistant").put("text",answer))
+                while (history.size > 6) history.removeFirst()
+                reply.text.clear()
+            }
             val proposed = result.optJSONObject("proposal")
             if (proposed == null) {
                 status.text = answer
@@ -460,7 +601,7 @@ class NasAlertAnswerActivity : Activity() {
                             401 -> "Phone access expired. Pair again from the NAS dashboard."
                             403 -> "Allow phone replies from the NAS dashboard."
                             409, 410 -> "The target changed or the proposal expired. Send a fresh reply."
-                            429 -> "The daily DeepSeek request limit has been reached."
+                            429 -> "The NAS daily AI allowance is used. Check Settings in the ToonShift Home dashboard for the count and reset time."
                             503 -> "DeepSeek is disabled or unavailable. Check the NAS dashboard."
                             else -> "The NAS could not complete the request."
                         }
@@ -480,10 +621,23 @@ class NasAlertAnswerActivity : Activity() {
             }
         }.start()
     }
+    override fun onResume() {
+        super.onResume()
+        active = true
+    }
+
     override fun onPause() {
-        recognizer?.cancel()
+        active = false
+        stopListening()
         speech?.stop()
         super.onPause()
     }
-    override fun onDestroy() { recognizer?.destroy(); speech?.shutdown(); super.onDestroy() }
+    override fun onDestroy() {
+        recognizer?.destroy()
+        offlineSpeech?.shutdown()
+        offlineRecognizer?.close()
+        offlineModel?.close()
+        speech?.shutdown()
+        super.onDestroy()
+    }
 }
