@@ -14,7 +14,10 @@ import android.media.AudioAttributes
 import android.media.RingtoneManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
+import android.provider.Settings
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -85,6 +88,38 @@ private data class AlertConfig(val url: String, val key: String, val pin: String
 }
 
 class NasAlertsActivity : Activity() {
+    private val handler = Handler(Looper.getMainLooper())
+    private lateinit var delivery: TextView
+    private val refreshDelivery = object : Runnable {
+        override fun run() {
+            val prefs = alertPrefs()
+            val checked = prefs.getLong("last-check", 0)
+            val received = prefs.getLong("last-ring", 0)
+            val current = System.currentTimeMillis()
+            val status = when {
+                !getSystemService(NotificationManager::class.java).areNotificationsEnabled() ->
+                    "Android has blocked ToonShift notifications."
+                checked > 0 && current - checked > 60_000 ->
+                    "No recent check-in. Start listening and check Tailscale."
+                else -> prefs.getString("status", "Alerts are off.").orEmpty()
+            }
+            val lastRing = if (received == 0L) "No ring received on this phone yet."
+                else "Last ring received " + java.text.DateFormat.getDateTimeInstance().format(java.util.Date(received))
+            delivery.text = "$status\n$lastRing"
+            handler.postDelayed(this, 1000)
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        handler.post(refreshDelivery)
+    }
+
+    override fun onPause() {
+        handler.removeCallbacks(refreshDelivery)
+        super.onPause()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         title = "ToonShift Home"
@@ -108,11 +143,20 @@ class NasAlertsActivity : Activity() {
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
         }
         val feedback = TextView(this)
+        delivery = TextView(this)
         val enable = Button(this).apply { text = "Start listening" }
         val stop = Button(this).apply { text = "Stop listening" }
+        val notificationSettings = Button(this).apply {
+            text = "Incoming alert sound settings"
+            setOnClickListener {
+                val settings = Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
+                    .putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+                    .putExtra(Settings.EXTRA_CHANNEL_ID, "nas-rings")
+                startActivity(settings)
+            }
+        }
         val existing = runCatching { alertVault().load().singleOrNull() }.getOrNull()
         if (existing != null) address.setText(existing.host)
-        feedback.text = alertPrefs().getString("status", "Alerts are off.")
         enable.setOnClickListener {
             if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
                 requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
@@ -138,7 +182,7 @@ class NasAlertsActivity : Activity() {
             stopService(Intent(this,NasAlertService::class.java))
             feedback.text = "Alerts are off."
         }
-        listOf(titleView,help,pairing,address,enable,stop,feedback).forEach { panel.addView(it) }
+        listOf(titleView,help,pairing,address,enable,stop,notificationSettings,feedback,delivery).forEach { panel.addView(it) }
         setContentView(ScrollView(this).apply { addView(panel) })
     }
 }
@@ -192,6 +236,7 @@ class NasAlertService : Service() {
                         return
                     }
                     check(response.isSuccessful)
+                    alertPrefs().edit().putLong("last-check",System.currentTimeMillis()).apply()
                     val body = JSONObject(response.body?.string().orEmpty())
                     val alerts = body.getJSONArray("alerts")
                     val serverTime = body.getLong("server_time")
@@ -202,14 +247,18 @@ class NasAlertService : Service() {
                         val id = alert.getLong("id")
                         val received = alert.getLong("received")
                         if (received < cursorTime || received == cursorTime && id <= cursor) continue
-                        if (serverTime - received in 0..120) ring(alert)
+                        if (serverTime - received in 0..120) {
+                            alertPrefs().edit().putLong("last-ring",System.currentTimeMillis()).apply()
+                            if (notificationIssue() == null) ring(alert)
+                            else break
+                        }
                         cursor = id
                         cursorTime = received
                     }
                     alertPrefs().edit().putLong("cursor",cursor).putLong("cursor-time",cursorTime).apply()
                 }
                 failures = 0
-                updateConnection("Connected. Listening for home alerts.")
+                updateConnection(notificationIssue() ?: "Connected. Listening for home alerts.")
             } catch (_: Exception) {
                 failures = (failures + 1).coerceAtMost(5)
                 updateConnection("NAS unavailable. Check Tailscale or the HTTPS certificate.")
@@ -219,6 +268,14 @@ class NasAlertService : Service() {
         }
     }
 
+    private fun notificationIssue(): String? {
+        if (!manager.areNotificationsEnabled() ||
+            manager.getNotificationChannel("nas-rings")?.importance == NotificationManager.IMPORTANCE_NONE) {
+            return "Connected, but Android is blocking incoming alerts. Open sound settings."
+        }
+        return null
+    }
+
     private fun ring(alert: JSONObject) {
         val id = (alert.getLong("id") % 100000).toInt() + 20000
         val evidence = alert.optJSONObject("evidence")
@@ -226,7 +283,8 @@ class NasAlertService : Service() {
             "electricity_high" -> "High electricity usage. The Toon measured ${evidence?.optInt("watts") ?: 0} watts."
             "gas_high" -> "High gas usage. The Toon measured ${evidence?.optInt("liters") ?: 0} liters in about five minutes."
             "heat_away" -> "The Toon is requesting heat while the household is set to Away."
-            "test_ring" -> "This is a ToonShift Home test call."
+            "test_ring" -> if (evidence?.optString("source") == "assistant") "Your ToonShift Home assistant is calling."
+                else "This is a ToonShift Home test call."
             else -> return
         }
         val answer = PendingIntent.getActivity(this,id,Intent(this,NasAlertAnswerActivity::class.java)
