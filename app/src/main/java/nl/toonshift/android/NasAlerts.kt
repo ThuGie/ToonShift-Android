@@ -15,6 +15,9 @@ import android.media.RingtoneManager
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.text.InputType
 import android.view.Gravity
@@ -26,6 +29,8 @@ import android.widget.TextView
 import android.widget.Toast
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.json.JSONObject
 import java.security.MessageDigest
@@ -241,25 +246,192 @@ class NasAlertService : Service() {
 
 class NasAlertAnswerActivity : Activity() {
     private var speech: TextToSpeech? = null
+    private var recognizer: SpeechRecognizer? = null
+    private var speaking = false
+    private var pendingId: String? = null
+    private lateinit var alert: String
+    private lateinit var reply: EditText
+    private lateinit var status: TextView
+    private lateinit var send: Button
+    private lateinit var approve: Button
+    private lateinit var dismissProposal: Button
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val text = intent.getStringExtra("text").orEmpty()
+        alert = intent.getStringExtra("text").orEmpty()
         getSystemService(NotificationManager::class.java).cancel(intent.getIntExtra("notification",-1))
-        val status = TextView(this).apply { this.text = text; textSize = 24f; gravity = Gravity.CENTER }
-        setContentView(LinearLayout(this).apply {
+        val heading = TextView(this).apply { text = alert; textSize = 24f }
+        status = TextView(this).apply { textSize = 17f }
+        reply = EditText(this).apply {
+            hint = "Reply, e.g. lower the room temperature"
+            filters = arrayOf(android.text.InputFilter.LengthFilter(450))
+        }
+        send = Button(this).apply { text = "Send reply"; setOnClickListener { sendReply() } }
+        approve = Button(this).apply {
+            text = "Approve change"
+            visibility = android.view.View.GONE
+            setOnClickListener { pendingId?.let { approveTarget(it) } }
+        }
+        dismissProposal = Button(this).apply {
+            text = "Dismiss proposal"
+            visibility = android.view.View.GONE
+            setOnClickListener { clearProposal(); status.text = "Proposal dismissed." }
+        }
+        val voice = Button(this).apply { text = "Speak reply"; setOnClickListener { listenForReply() } }
+        val close = Button(this).apply { text = "End call"; setOnClickListener { finish() } }
+        val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-            setPadding(32,32,32,32)
-            addView(status)
-            addView(Button(context).apply { this.text = "Dismiss"; setOnClickListener { finish() } })
-        })
+            val inset = (24 * resources.displayMetrics.density).toInt()
+            setPadding(inset,inset,inset,inset)
+        }
+        listOf(heading,reply,voice,send,status,approve,dismissProposal,close).forEach { panel.addView(it) }
+        setContentView(ScrollView(this).apply { addView(panel) })
         speech = TextToSpeech(this) { result ->
-            if (result == TextToSpeech.SUCCESS) {
-                val engine = speech ?: return@TextToSpeech
-                val voice = engine.voices?.firstOrNull { !it.isNetworkConnectionRequired && it.locale.language == Locale.ENGLISH.language }
-                if (voice != null) { engine.voice = voice; engine.speak(text,TextToSpeech.QUEUE_FLUSH,null,"toonshift-alert") }
+            val engine = speech
+            if (result == TextToSpeech.SUCCESS && engine != null) {
+                val language = Locale.getDefault().language
+                val offline = engine.voices.orEmpty().filter { !it.isNetworkConnectionRequired }
+                val selected = offline.firstOrNull { it.locale.language == language }
+                    ?: offline.firstOrNull { it.locale.language == Locale.ENGLISH.language }
+                if (selected != null) { engine.voice = selected; speaking = true; speak(alert) }
             }
         }
     }
-    override fun onDestroy() { speech?.shutdown(); super.onDestroy() }
+
+    private fun speak(text: String) {
+        if (speaking) speech?.speak(text,TextToSpeech.QUEUE_FLUSH,null,"toonshift-alert")
+    }
+
+    private fun listenForReply() {
+        if (Build.VERSION.SDK_INT < 31 || !SpeechRecognizer.isOnDeviceRecognitionAvailable(this)) {
+            status.text = "Offline speech recognition is unavailable. You can type a reply."
+            return
+        }
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 2)
+            return
+        }
+        speech?.stop()
+        recognizer?.destroy()
+        val local = runCatching { SpeechRecognizer.createOnDeviceSpeechRecognizer(this) }.getOrElse {
+            status.text = "Offline speech recognition is unavailable. You can type a reply."
+            return
+        }
+        recognizer = local
+        local.setRecognitionListener(object : RecognitionListener {
+            override fun onReadyForSpeech(params: Bundle?) { status.text = "Listening…" }
+            override fun onResults(results: Bundle?) {
+                val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
+                if (text != null) {
+                    reply.setText(text.take(450))
+                    status.text = "Review the text and tap Send reply."
+                } else status.text = "No speech recognized. Try again or type a reply."
+            }
+            override fun onError(error: Int) { status.text = "Speech recognition is unavailable. Try typing your reply." }
+            override fun onBeginningOfSpeech() = Unit
+            override fun onRmsChanged(rmsdB: Float) = Unit
+            override fun onBufferReceived(buffer: ByteArray?) = Unit
+            override fun onEndOfSpeech() = Unit
+            override fun onPartialResults(partialResults: Bundle?) = Unit
+            override fun onEvent(eventType: Int, params: Bundle?) = Unit
+        })
+        local.startListening(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+            .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL,RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            .putExtra(RecognizerIntent.EXTRA_LANGUAGE,Locale.getDefault().toLanguageTag())
+            .putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE,true))
+    }
+
+    private fun clearProposal() {
+        pendingId = null
+        approve.visibility = android.view.View.GONE
+        dismissProposal.visibility = android.view.View.GONE
+    }
+
+    private fun sendReply() {
+        val text = reply.text.toString().trim()
+        if (text.isEmpty()) return
+        clearProposal()
+        perform("reply", JSONObject().put("question",text)
+            .put("alert_context",alert.take(180)).put("language",Locale.getDefault().language)) { result ->
+            val answer = result.optString("answer")
+            val proposed = result.optJSONObject("proposal")
+            if (proposed == null) {
+                status.text = answer
+                speak(answer)
+            } else {
+                pendingId = proposed.getString("id")
+                val before = degrees(proposed.getInt("current_centi_celsius"))
+                val target = degrees(proposed.getInt("target_centi_celsius"))
+                val change = "Change room target from $before to $target?"
+                status.text = "$answer\n\n$change"
+                approve.visibility = android.view.View.VISIBLE
+                dismissProposal.visibility = android.view.View.VISIBLE
+                speak(change)
+            }
+        }
+    }
+
+    private fun degrees(value: Int) = java.text.NumberFormat.getNumberInstance().format(value / 100.0) + " °C"
+
+    private fun approveTarget(id: String) {
+        if (getSystemService(android.app.KeyguardManager::class.java).isDeviceLocked) {
+            status.text = "Unlock your phone to approve the room target."
+            return
+        }
+        clearProposal()
+        perform("approve", JSONObject().put("id",id)) { result ->
+            val actual = result.optInt("actual_centi_celsius",0)
+            val message = when {
+                result.optBoolean("grant_rejected") -> "The Toon rejected control access."
+                result.optBoolean("confirmed") -> "Toon confirmed ${degrees(actual)}."
+                actual > 0 -> "Change unconfirmed. Toon reports ${degrees(actual)}."
+                else -> "The Toon could not confirm the change."
+            }
+            status.text = message
+            speak(message)
+        }
+    }
+
+    private fun perform(action: String, data: JSONObject, onSuccess: (JSONObject) -> Unit) {
+        send.isEnabled = false
+        status.text = if (action == "reply") "Waiting for your NAS…" else "Checking the Toon…"
+        Thread {
+            val result = runCatching {
+                val saved = alertVault().load().single()
+                val config = AlertConfig(saved.host,saved.token,saved.pin)
+                val endpoint = requireNotNull(config.url.toHttpUrl().resolve("api/v1/phone/$action"))
+                val request = Request.Builder().url(endpoint).header("Authorization","Bearer ${config.key}")
+                    .post(data.toString().toRequestBody("application/json".toMediaType())).build()
+                config.client().newBuilder().callTimeout(32,TimeUnit.SECONDS).build()
+                    .newCall(request).execute().use { response ->
+                        val message = when (response.code) {
+                            401 -> "Phone access expired. Pair again from the NAS dashboard."
+                            403 -> "Allow phone replies from the NAS dashboard."
+                            409, 410 -> "The target changed or the proposal expired. Send a fresh reply."
+                            429 -> "The daily DeepSeek request limit has been reached."
+                            503 -> "DeepSeek is disabled or unavailable. Check the NAS dashboard."
+                            else -> "The NAS could not complete the request."
+                        }
+                        if (!response.isSuccessful) throw IllegalStateException(message)
+                        JSONObject(response.body?.string().orEmpty())
+                    }
+            }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                send.isEnabled = true
+                result.fold(
+                    onSuccess = onSuccess,
+                    onFailure = { error ->
+                        status.text = if (error is IllegalStateException) error.message
+                            else "Cannot reach the NAS. Check Tailscale."
+                    })
+            }
+        }.start()
+    }
+    override fun onPause() {
+        recognizer?.cancel()
+        speech?.stop()
+        super.onPause()
+    }
+    override fun onDestroy() { recognizer?.destroy(); speech?.shutdown(); super.onDestroy() }
 }
