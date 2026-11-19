@@ -209,6 +209,10 @@ private fun ToonApp(vault: Vault, pairing: PairingViewModel, dutch: Boolean) {
                 else -> {
                     PageHeading(t.tr("Devices","Apparaten"),
                         t.tr("Manage paired Toons and phone access.", "Beheer gekoppelde Toons en telefoontoegang."))
+                    val context = androidx.compose.ui.platform.LocalContext.current
+                    OutlinedButton(onClick = { context.startActivity(android.content.Intent(context, NasAlertsActivity::class.java)) }) {
+                        Text(t.tr("NAS alerts", "NAS-meldingen"))
+                    }
                     toons.forEach { item ->
                         WorkspacePanel {
                             Row(Modifier.fillMaxWidth(),

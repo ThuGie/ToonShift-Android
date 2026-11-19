@@ -67,9 +67,8 @@ internal fun privateAddress(text: String): Boolean {
 
 data class Toon(val id: String, val name: String, val host: String, val pin: String, val token: String, val zone: String)
 
-class Vault(context: Context) {
-    private val file = AtomicFile(File(context.noBackupFilesDir, "paired-toons"))
-    private val alias = "toonshift-android-v1"
+class Vault(context: Context, filename: String = "paired-toons", private val alias: String = "toonshift-android-v1") {
+    private val file = AtomicFile(File(context.noBackupFilesDir, filename))
 
     private fun key(): SecretKey {
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
