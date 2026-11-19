@@ -278,28 +278,14 @@ class NasAlertService : Service() {
 
     private fun ring(alert: JSONObject) {
         val id = (alert.getLong("id") % 100000).toInt() + 20000
-        val evidence = alert.optJSONObject("evidence")
-        val text = when (alert.getString("rule")) {
-            "electricity_high" -> "High electricity usage. The Toon measured ${evidence?.optInt("watts") ?: 0} watts."
-            "gas_high" -> {
-                val liters = evidence?.optDouble("liters")?.takeIf { it.isFinite() && it >= 0 }
-                if (liters == null) "Bliss here. The Toon detected a gas usage spike."
-                else {
-                    val format = java.text.NumberFormat.getNumberInstance().apply { maximumFractionDigits = 1 }
-                    val amount = format.format(liters)
-                    "Bliss here. The Toon measured $amount liters of gas in about five minutes. That crossed your gas alert threshold. If you were using hot water, that could explain the spike."
-                }
-            }
-            "heat_away" -> "The Toon is requesting heat while the household is set to Away."
-            "test_ring" -> if (evidence?.optString("source") == "assistant") "Your ToonShift Home assistant is calling."
-                else "This is a ToonShift Home test call."
-            else -> return
-        }
+        val rule = alert.getString("rule")
+        if (rule !in setOf("electricity_high", "gas_high", "heat_away", "test_ring")) return
+        val greeting = alert.optString("greeting").takeUnless { it.isBlank() || it == "null" }
         val answer = PendingIntent.getActivity(this,id,Intent(this,NasAlertAnswerActivity::class.java)
-            .putExtra("text",text).putExtra("notification",id),PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+            .putExtra("text",greeting).putExtra("notification",id),PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         manager.notify(id,Notification.Builder(this,"nas-rings").setSmallIcon(android.R.drawable.ic_dialog_info)
             .setCategory(Notification.CATEGORY_CALL).setVisibility(Notification.VISIBILITY_PRIVATE)
-            .setContentTitle("ToonShift Home is calling").setContentText(text).setContentIntent(answer).setAutoCancel(true)
+            .setContentTitle("Bliss · ToonShift Home").setContentText(greeting ?: "Voice greeting unavailable").setContentIntent(answer).setAutoCancel(true)
             .addAction(Notification.Action.Builder(null,"Answer",answer).build()).build())
     }
 
@@ -326,7 +312,7 @@ class NasAlertAnswerActivity : Activity() {
         super.onCreate(savedInstanceState)
         alert = intent.getStringExtra("text").orEmpty()
         getSystemService(NotificationManager::class.java).cancel(intent.getIntExtra("notification",-1))
-        val heading = TextView(this).apply { text = alert; textSize = 24f }
+        val heading = TextView(this).apply { text = alert.ifBlank { "Bliss voice greeting unavailable" }; textSize = 24f }
         status = TextView(this).apply { textSize = 17f }
         reply = EditText(this).apply {
             hint = "Reply, e.g. lower the room temperature"
@@ -359,7 +345,7 @@ class NasAlertAnswerActivity : Activity() {
                 val offline = engine.voices.orEmpty().filter { !it.isNetworkConnectionRequired }
                 val selected = offline.firstOrNull { it.locale.language == language }
                     ?: offline.firstOrNull { it.locale.language == Locale.ENGLISH.language }
-                if (selected != null) { engine.voice = selected; speaking = true; speak(alert) }
+                if (selected != null) { engine.voice = selected; speaking = true; if (alert.isNotBlank()) speak(alert) }
             }
         }
     }
