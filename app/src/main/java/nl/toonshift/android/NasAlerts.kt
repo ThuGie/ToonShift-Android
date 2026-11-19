@@ -497,7 +497,7 @@ class NasAlertAnswerActivity : Activity() {
                 }
                 voicePending = false
                 if (audio == null) {
-                    status.text = status.text.toString() + "\nNeural voice unavailable. Check NAS replies and its AI allowance."
+                    fallbackVoice(text)
                     return@runOnUiThread
                 }
                 voiceFile = audio
@@ -513,11 +513,18 @@ class NasAlertAnswerActivity : Activity() {
                         stopVoice()
                         if (active && handsFree && send.isEnabled && pendingId == null) listenForReply()
                     }
-                    player.setOnErrorListener { _, _, _ -> stopVoice(); true }
+                    player.setOnErrorListener { _, _, _ -> stopVoice(); fallbackVoice(text); true }
                     player.prepareAsync()
-                } catch (_: Exception) { stopVoice() }
+                } catch (_: Exception) { stopVoice(); fallbackVoice(text) }
             }
         }.start()
+    }
+
+    private fun fallbackVoice(text: String) {
+        if (!active) return
+        status.text = status.text.toString() + "\nNeural audio unavailable."
+        if (speaking && speech?.speak(text,TextToSpeech.QUEUE_FLUSH,null,"toonshift-alert") == TextToSpeech.SUCCESS) return
+        if (handsFree && send.isEnabled && pendingId == null) listenForReply()
     }
 
     private fun listenForReply() {
@@ -697,7 +704,7 @@ class NasAlertAnswerActivity : Activity() {
                 val endpoint = requireNotNull(config.url.toHttpUrl().resolve("api/v1/phone/$action"))
                 val request = Request.Builder().url(endpoint).header("Authorization","Bearer ${config.key}")
                     .post(data.toString().toRequestBody("application/json".toMediaType())).build()
-                config.client().newBuilder().callTimeout(32,TimeUnit.SECONDS).build()
+                config.client().newBuilder().callTimeout(58,TimeUnit.SECONDS).readTimeout(55,TimeUnit.SECONDS).build()
                     .newCall(request).execute().use { response ->
                         val message = when (response.code) {
                             401 -> "Phone access expired. Pair again from the NAS dashboard."
