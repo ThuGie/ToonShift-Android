@@ -150,6 +150,10 @@ class NasAlertsActivity : ComponentActivity() {
                     }
                     WorkspacePanel {
                         SectionHeading(tr("Incoming calls","Inkomende oproepen"))
+                        Button(enabled = saved != null, onClick = {
+                            startActivity(Intent(this@NasAlertsActivity,NasAlertAnswerActivity::class.java)
+                                .putExtra("outgoing",true))
+                        }) { Text(tr("Call Bliss","Bel Bliss")) }
                         Text(tr("Use Test ring in the NAS dashboard to check delivery.","Gebruik Testoproep op het NAS-dashboard om de verbinding te controleren."))
                         OutlinedButton(onClick = {
                             val manager = getSystemService(NotificationManager::class.java)

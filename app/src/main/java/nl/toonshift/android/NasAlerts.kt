@@ -299,7 +299,11 @@ class NasAlertAnswerActivity : Activity() {
         super.onCreate(savedInstanceState)
         alert = intent.getStringExtra("text").orEmpty()
         getSystemService(NotificationManager::class.java).cancel(intent.getIntExtra("notification",-1))
-        val heading = TextView(this).apply { text = alert.ifBlank { "Bliss voice greeting unavailable" }; textSize = 24f }
+        val outgoing = intent.getBooleanExtra("outgoing",false)
+        val heading = TextView(this).apply {
+            text = if (outgoing) "Bliss" else alert.ifBlank { "Bliss voice greeting unavailable" }
+            textSize = 24f
+        }
         status = TextView(this).apply { textSize = 17f }
         reply = EditText(this).apply {
             hint = "Reply, e.g. lower the room temperature"

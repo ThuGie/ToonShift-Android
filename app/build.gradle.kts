@@ -10,8 +10,8 @@ android {
         applicationId = "nl.toonshift.android"
         minSdk = 26
         targetSdk = 35
-        versionCode = 16
-        versionName = "0.4.11"
+        versionCode = 17
+        versionName = "0.4.12"
     }
     buildFeatures { compose = true }
     compileOptions {
